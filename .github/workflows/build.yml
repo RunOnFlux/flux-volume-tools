@@ -62,6 +62,7 @@ jobs:
           assert "tar supports --no-same-owner"                     'no-same-owner' tar --help
           assert "cp supports -T"                                   '-T' cp --help
           assert "mv supports -T"                                   '-T' mv --help
+          assert "zip is present and can create an archive"          'zip' sh -c 'command -v zip'
           assert "gzip is present"                                  'gzip' sh -c 'command -v gzip'
 
           echo "-T must actually refuse to recurse into an existing destination"

@@ -101,6 +101,7 @@ The image guarantees these binaries, with GNU / Info-ZIP semantics:
 | `cp`, `mv` | `coreutils` | predictable GNU semantics (busybox does implement `-T`) |
 | `tar` | `tar` | busybox tar has no `--no-same-owner` |
 | `unzip` | `unzip` | busybox's applet has no zip64, capping archives at 4 GB |
+| `zip` | `zip` | busybox has no zip applet at all |
 | `gzip` | busybox | applet is sufficient |
 
 There is no entrypoint. The executor always supplies argv.

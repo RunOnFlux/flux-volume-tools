@@ -11,16 +11,18 @@
 # byte-identical image.
 FROM alpine:3.24
 
-# Alpine ships busybox applets for all of these. Two are not sufficient:
+# Alpine ships busybox applets for most of these. Three are not sufficient:
 #
 #   tar    busybox tar has no --no-same-owner, so an archive's recorded uids land
 #          verbatim and extracted files can end up unreadable by the app that owns
 #          the volume.
 #   unzip  busybox's applet has no zip64 support, capping archives at 4 GB.
+#   zip    busybox has no zip applet at all, and creating archives is half of
+#          what this image is for.
 #
 # coreutils is installed for GNU cp/mv semantics throughout. busybox does implement
 # -T, so this one is about predictable behaviour rather than a missing flag.
-RUN apk add --no-cache coreutils tar unzip
+RUN apk add --no-cache coreutils tar zip unzip
 
 # Runs a command into a staging directory and publishes the result with an atomic
 # rename, so an operation that fails, is cancelled, or is interrupted by a power
