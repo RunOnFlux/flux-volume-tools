@@ -120,6 +120,17 @@ jobs:
             flux-op --mkdir /w/.flux-op-6 /w/out -- tar -xf /w/a.tar -C /w/.flux-op-6
             grep -qx x /w/out/src/f'
 
+          op "a publish records where the displaced data belongs before moving it" '
+            # Without the marker, a crash between the two renames leaves the
+            # only copy of the previous data under a name that says nothing
+            # about where it came from, and the sweep deletes it.
+            mkdir -p /w/src /w/dest && echo new > /w/src/f && echo precious > /w/dest/keep
+            cp -a -T /w/src /w/.flux-op-7
+            printf "%s\n" /w/dest > /w/.flux-old-7.dest
+            mv -T /w/dest /w/.flux-old-7
+            grep -qx /w/dest /w/.flux-old-7.dest
+            grep -qx precious /w/.flux-old-7/keep'
+
   publish:
     needs: smoke-test
     if: github.event_name != 'pull_request'

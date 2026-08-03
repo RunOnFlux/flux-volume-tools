@@ -72,8 +72,14 @@ Leftovers are named for a startup sweep to recognise:
 | Left behind | Means | Recovery |
 |---|---|---|
 | `.flux-op-*` | the operation never completed | delete; nobody is waiting for it |
-| `.flux-old-*`, destination missing | crash mid-swap | rename it back |
-| `.flux-old-*`, destination present | the swap completed | delete |
+| `.flux-old-<id>`, destination missing | crash between the two renames | rename it back |
+| `.flux-old-<id>`, destination present | the swap completed | delete |
+| `.flux-old-<id>.dest` | records where `.flux-old-<id>` belongs | delete with it |
+
+The `.dest` marker is written *before* the old entry is moved aside. Without it a
+crash between the two renames would leave the caller's only copy of that data
+under a name that says nothing about where it came from, and the sweep would
+delete it.
 
 This is **atomic visibility, not durability.** You will never see a half-written
 result at the destination path. A power cut seconds after a copy can still leave

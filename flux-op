@@ -66,7 +66,14 @@ if [ ! -e "$destination" ] && [ ! -L "$destination" ]; then
 else
   staging_base=$(basename "$staging")
   old="$(dirname "$staging")/.flux-old-${staging_base#.flux-op-}"
+
+  # Where the data being moved aside belongs, written BEFORE it is moved. A
+  # crash between the two renames below leaves the caller's previous data under
+  # $old with its own path empty, and without this the sweep has no way to know
+  # where to put it back - it would delete the only copy.
+  printf '%s\n' "$destination" > "$old.dest"
+
   mv -T "$destination" "$old"
   mv -T "$staging" "$destination"
-  rm -rf "$old"
+  rm -rf "$old" "$old.dest"
 fi
