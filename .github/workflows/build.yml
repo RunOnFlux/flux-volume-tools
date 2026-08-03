@@ -121,6 +121,24 @@ jobs:
             flux-op --mkdir /w/.flux-op-6 /w/out -- tar -xf /w/a.tar -C /w/.flux-op-6
             grep -qx x /w/out/src/f'
 
+          op "a result over the byte ceiling is refused and its staging removed" '
+            # Checked after the command rather than from what an archive claims
+            # about itself - those numbers are attacker-written, so a bomb lies.
+            mkdir -p /w/src && head -c 2000 /dev/zero > /w/src/big
+            flux-op --max-bytes 1000 /w/.flux-op-8 /w/dest -- cp -a -T /w/src /w/.flux-op-8 2>/dev/null && exit 1
+            test ! -e /w/dest
+            test ! -e /w/.flux-op-8'
+
+          op "a result containing a link is refused" '
+            mkdir -p /w/src && ln -s /etc/shadow /w/src/link
+            flux-op --no-links /w/.flux-op-9 /w/dest -- cp -a -T /w/src /w/.flux-op-9 2>/dev/null && exit 1
+            test ! -e /w/dest'
+
+          op "a failed command leaves no staging behind" '
+            mkdir -p /w/src && echo x > /w/src/f
+            flux-op /w/.flux-op-10 /w/dest -- false 2>/dev/null && exit 1
+            test ! -e /w/.flux-op-10'
+
           op "a publish records where the displaced data belongs before moving it" '
             # Without the marker, a crash between the two renames leaves the
             # only copy of the previous data under a name that says nothing

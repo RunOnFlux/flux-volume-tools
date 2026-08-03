@@ -53,7 +53,7 @@ an unprivileged system user is meant to remove.
 ## `flux-op` — publishing a result atomically
 
 ```
-flux-op [--mkdir] <staging> <destination> -- <command> [args...]
+flux-op [--mkdir] [--max-bytes N] [--no-links] <staging> <destination> -- <command> [args...]
 ```
 
 The command writes into `<staging>`, never into `<destination>`. Only on success
@@ -80,6 +80,18 @@ The `.dest` marker is written *before* the old entry is moved aside. Without it 
 crash between the two renames would leave the caller's only copy of that data
 under a name that says nothing about where it came from, and the sweep would
 delete it.
+
+`--max-bytes` caps what the command may leave in staging, and `--no-links`
+refuses a result containing symlinks or hard links. Both are checked **after**
+the command runs rather than from what an archive declares about itself: those
+figures are written by whoever built the archive, so a bomb simply lies about
+them. Staging is discarded on breach and the destination is never touched.
+
+A failure anywhere before the publish removes staging immediately rather than
+leaving it for the startup sweep — a refused extraction gives the volume its
+space back at once, which matters because size is often why it was refused. That
+cleanup is disarmed the moment the swap begins, since past that point the same
+names refer to the caller's previous data.
 
 This is **atomic visibility, not durability.** You will never see a half-written
 result at the destination path. A power cut seconds after a copy can still leave

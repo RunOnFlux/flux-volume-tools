@@ -1,7 +1,7 @@
 #!/bin/sh
 # Run one file operation and publish its result atomically.
 #
-#   flux-op [--mkdir] <staging> <destination> -- <command> [args...]
+#   flux-op [--mkdir] [--max-bytes N] [--no-links] <staging> <destination> -- <command> [args...]
 #
 # The command writes into <staging>, never into <destination>. Only if it
 # succeeds is the result moved into place. A command that fails, a container
@@ -19,13 +19,27 @@
 set -eu
 
 make_staging=0
-if [ "${1:-}" = "--mkdir" ]; then
-  make_staging=1
-  shift
-fi
+max_bytes=0
+no_links=0
+while :; do
+  case "${1:-}" in
+    --mkdir)     make_staging=1; shift ;;
+    # A ceiling on what the command may leave in staging. Checked AFTER it runs
+    # rather than from what an archive declares about itself: those numbers are
+    # written by whoever made the archive, so a bomb simply lies. Staging is
+    # discarded on breach and the destination is never touched.
+    --max-bytes) max_bytes=${2:-0}; shift 2 ;;
+    # Refuse a result containing links. An archive that carries a symlink and
+    # then writes through it reaches wherever the link points; inside this
+    # container that is nowhere useful, but the result is published onto a
+    # volume that other code paths - and other nodes, through sync - do read.
+    --no-links)  no_links=1; shift ;;
+    *) break ;;
+  esac
+done
 
 if [ "$#" -lt 4 ]; then
-  echo "flux-op: usage: flux-op [--mkdir] <staging> <destination> -- <command> [args...]" >&2
+  echo "flux-op: usage: flux-op [--mkdir] [--max-bytes N] [--no-links] <staging> <destination> -- <command> [args...]" >&2
   exit 2
 fi
 
@@ -39,6 +53,18 @@ if [ "$1" != "--" ]; then
 fi
 shift
 
+# Anything that fails from here until the publish begins leaves staging behind,
+# and nobody is coming back for it - the operation is over. Removing it here
+# rather than leaving it for the startup sweep means a refused extraction gives
+# the volume its space back immediately, which matters because the reason it was
+# refused may well have been size.
+#
+# Disarmed the moment the swap starts: past that point the same variables name
+# the caller's PREVIOUS data, and deleting it is the one outcome this whole
+# script exists to prevent.
+cleanup_staging=1
+trap '[ "$cleanup_staging" -eq 1 ] && rm -rf "$staging" 2>/dev/null; true' EXIT
+
 # Only the commands that need an existing directory to write into (tar -C, for
 # one) ask for this. A file copy must NOT have it: cp -T refuses to overwrite a
 # directory with a non-directory.
@@ -47,6 +73,23 @@ if [ "$make_staging" -eq 1 ]; then
 fi
 
 "$@"
+
+if [ "$max_bytes" -gt 0 ]; then
+  produced=$(du -sb "$staging" 2>/dev/null | cut -f1)
+  if [ -n "$produced" ] && [ "$produced" -gt "$max_bytes" ]; then
+    echo "flux-op: result is $produced bytes, over the $max_bytes limit" >&2
+    exit 3
+  fi
+fi
+
+if [ "$no_links" -eq 1 ]; then
+  if [ -n "$(find "$staging" \( -type l -o \( -type f -links +1 \) \) -print -quit 2>/dev/null)" ]; then
+    echo "flux-op: result contains links, which are not accepted here" >&2
+    exit 4
+  fi
+fi
+
+cleanup_staging=0
 
 # A destination that does not exist is one atomic rename and nothing to clean up.
 #
