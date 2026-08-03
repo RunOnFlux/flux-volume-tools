@@ -41,27 +41,36 @@ jobs:
       - name: Assert the toolchain
         run: |
           set -euo pipefail
-          run() { docker run --rm flux-volume-tools:test "$@"; }
 
-          echo "unzip must be Info-ZIP, not the busybox applet (zip64)"
-          run unzip -v | head -1 | grep -q 'Info-ZIP'
+          # Output is captured before matching rather than piped into grep: `grep -q`
+          # exits on its first match and closes the pipe, and the SIGPIPE that sends
+          # upstream trips `pipefail` non-deterministically.
+          assert() {
+            local label="$1" pattern="$2"; shift 2
+            local out
+            out="$(docker run --rm flux-volume-tools:test "$@" 2>&1 || true)"
+            if grep -q -- "$pattern" <<<"$out"; then
+              echo "ok - $label"
+            else
+              echo "FAIL - $label (no match for '$pattern')"
+              echo "$out" | head -5
+              exit 1
+            fi
+          }
 
-          echo "tar must support --no-same-owner"
-          run tar --help 2>&1 | grep -q 'no-same-owner'
-
-          echo "cp and mv must support -T"
-          run cp --help 2>&1 | grep -q -- '-T'
-          run mv --help 2>&1 | grep -q -- '-T'
-
-          echo "gzip must be present"
-          run sh -c 'command -v gzip'
+          assert "unzip is Info-ZIP, not the busybox applet (zip64)" 'Info-ZIP' unzip -v
+          assert "tar supports --no-same-owner"                     'no-same-owner' tar --help
+          assert "cp supports -T"                                   '-T' cp --help
+          assert "mv supports -T"                                   '-T' mv --help
+          assert "gzip is present"                                  'gzip' sh -c 'command -v gzip'
 
           echo "-T must actually refuse to recurse into an existing destination"
-          run sh -c '
+          docker run --rm flux-volume-tools:test sh -c '
             mkdir -p /tmp/src /tmp/dst && echo hi > /tmp/src/f
             cp -a -T /tmp/src /tmp/dst
             test -f /tmp/dst/f && ! test -e /tmp/dst/src
           '
+          echo "ok - cp -a -T does not nest"
 
   publish:
     needs: smoke-test
