@@ -50,6 +50,42 @@ routing filesystem work through Docker adds no new privilege — whereas running
 `sudo cp` on the host requires sudoers rules that the planned demotion of FluxOS to
 an unprivileged system user is meant to remove.
 
+## `flux-op` — publishing a result atomically
+
+```
+flux-op [--mkdir] <staging> <destination> -- <command> [args...]
+```
+
+The command writes into `<staging>`, never into `<destination>`. Only on success
+is the result moved into place. A command that fails, a container that is killed,
+and a node that loses power all leave `<destination>` exactly as it was.
+
+Publishing goes through a swap — move the old entry aside, move the new one in,
+delete the old — rather than a delete-then-rename. `rename(2)` refuses a
+non-empty directory as its target and cannot replace a file with a directory at
+all, so `mv` alone would have to delete first, and a crash in that window loses
+the destination outright. Both renames in the swap are atomic, so the worst a
+crash leaves is the previous data under `.flux-old-*`.
+
+Leftovers are named for a startup sweep to recognise:
+
+| Left behind | Means | Recovery |
+|---|---|---|
+| `.flux-op-*` | the operation never completed | delete; nobody is waiting for it |
+| `.flux-old-*`, destination missing | crash mid-swap | rename it back |
+| `.flux-old-*`, destination present | the swap completed | delete |
+
+This is **atomic visibility, not durability.** You will never see a half-written
+result at the destination path. A power cut seconds after a copy can still leave
+files whose contents had not reached disk — that is true of `cp` on Linux
+generally and is not something this changes.
+
+It lives in the image rather than in the caller so one container does the work
+*and* the publish: the "did it succeed" and "put it in place" decisions cannot
+drift apart, and no second container spawn is needed per operation. Operands
+arrive as positional parameters and are never interpolated into a command
+string.
+
 ## Contract
 
 The image guarantees these binaries, with GNU / Info-ZIP semantics:

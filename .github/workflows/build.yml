@@ -72,6 +72,54 @@ jobs:
           '
           echo "ok - cp -a -T does not nest"
 
+          # flux-op's contract: the destination changes only on success, and it
+          # changes atomically whatever the two entry types are. rename(2) cannot
+          # replace a file with a directory (or the reverse) at all, and refuses
+          # a non-empty directory target - which is why publishing goes through a
+          # swap rather than a delete-then-rename, and why every combination is
+          # covered here rather than just the common one.
+          op() {
+            local label="$1" script="$2"
+            if docker run --rm flux-volume-tools:test sh -c "$script" >/dev/null 2>&1; then
+              echo "ok - $label"
+            else
+              echo "FAIL - $label"
+              exit 1
+            fi
+          }
+
+          op "a failed command leaves the destination untouched" '
+            mkdir -p /w && echo original > /w/dest
+            flux-op /w/.flux-op-1 /w/dest -- false 2>/dev/null && exit 1
+            grep -qx original /w/dest'
+
+          op "a directory replaces an existing file" '
+            mkdir -p /w/src && echo new > /w/src/f && echo original > /w/dest
+            flux-op /w/.flux-op-2 /w/dest -- cp -a -T /w/src /w/.flux-op-2
+            grep -qx new /w/dest/f'
+
+          op "a directory replaces an existing directory, and does not merge into it" '
+            mkdir -p /w/src /w/dest && echo new > /w/src/f && echo old > /w/dest/keep
+            flux-op /w/.flux-op-3 /w/dest -- cp -a -T /w/src /w/.flux-op-3
+            grep -qx new /w/dest/f
+            test ! -e /w/dest/keep'
+
+          op "a file replaces an existing directory" '
+            mkdir -p /w && echo new > /w/src && mkdir -p /w/dest && echo old > /w/dest/keep
+            flux-op /w/.flux-op-4 /w/dest -- cp -a -T /w/src /w/.flux-op-4
+            grep -qx new /w/dest'
+
+          op "a new destination leaves no staging or swap directory behind" '
+            mkdir -p /w/src && echo new > /w/src/f
+            flux-op /w/.flux-op-5 /w/dest -- cp -a -T /w/src /w/.flux-op-5
+            grep -qx new /w/dest/f
+            test -z "$(ls -A /w | grep flux- || true)"'
+
+          op "--mkdir creates the staging directory for commands that need one" '
+            mkdir -p /w/src && echo x > /w/src/f && tar -cf /w/a.tar -C /w src
+            flux-op --mkdir /w/.flux-op-6 /w/out -- tar -xf /w/a.tar -C /w/.flux-op-6
+            grep -qx x /w/out/src/f'
+
   publish:
     needs: smoke-test
     if: github.event_name != 'pull_request'

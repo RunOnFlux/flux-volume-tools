@@ -1,0 +1,72 @@
+#!/bin/sh
+# Run one file operation and publish its result atomically.
+#
+#   flux-op [--mkdir] <staging> <destination> -- <command> [args...]
+#
+# The command writes into <staging>, never into <destination>. Only if it
+# succeeds is the result moved into place. A command that fails, a container
+# that is killed, and a node that loses power all leave <destination> exactly as
+# it was, with the incomplete work parked under a name the startup sweep
+# recognises.
+#
+# This lives in the image rather than in the caller so that one container does
+# the work AND the publish: the "did it succeed" and "put it in place" decisions
+# cannot drift apart, and a second container spawn is not needed per operation.
+#
+# Operands arrive as positional parameters and are never interpolated into a
+# command string - "$@" runs the command with its argv intact, so there is no
+# shell parsing of anything the caller supplied.
+set -eu
+
+make_staging=0
+if [ "${1:-}" = "--mkdir" ]; then
+  make_staging=1
+  shift
+fi
+
+if [ "$#" -lt 4 ]; then
+  echo "flux-op: usage: flux-op [--mkdir] <staging> <destination> -- <command> [args...]" >&2
+  exit 2
+fi
+
+staging=$1
+destination=$2
+shift 2
+
+if [ "$1" != "--" ]; then
+  echo "flux-op: expected -- before the command" >&2
+  exit 2
+fi
+shift
+
+# Only the commands that need an existing directory to write into (tar -C, for
+# one) ask for this. A file copy must NOT have it: cp -T refuses to overwrite a
+# directory with a non-directory.
+if [ "$make_staging" -eq 1 ]; then
+  mkdir -p "$staging"
+fi
+
+"$@"
+
+# A destination that does not exist is one atomic rename and nothing to clean up.
+#
+# Replacing one that DOES exist cannot be a single rename in the general case.
+# rename(2) refuses a non-empty directory as its target, and refuses to replace a
+# file with a directory (or the reverse) at all - so `mv` would have to delete
+# the existing entry first, and a crash in that window loses the destination
+# outright while the replacement sits under a staging name nobody recognises.
+#
+# Moving the old entry aside first avoids the window whatever the two types are.
+# Both renames are atomic, so the worst a crash leaves is the old data under
+# .flux-old-*, which the startup sweep renames back when it finds the
+# destination missing. Uniform rather than branching on type: the branch is
+# where the file-replaced-by-directory case was originally missed.
+if [ ! -e "$destination" ] && [ ! -L "$destination" ]; then
+  mv -T "$staging" "$destination"
+else
+  staging_base=$(basename "$staging")
+  old="$(dirname "$staging")/.flux-old-${staging_base#.flux-op-}"
+  mv -T "$destination" "$old"
+  mv -T "$staging" "$destination"
+  rm -rf "$old"
+fi

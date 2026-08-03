@@ -22,6 +22,13 @@ FROM alpine:3.24
 # -T, so this one is about predictable behaviour rather than a missing flag.
 RUN apk add --no-cache coreutils tar unzip
 
+# Runs a command into a staging directory and publishes the result with an atomic
+# rename, so an operation that fails, is cancelled, or is interrupted by a power
+# cut leaves the caller's data exactly as it was. Living in the image means one
+# container does the work AND the publish - see the script for why that matters.
+COPY flux-op /usr/local/bin/flux-op
+RUN chmod 0755 /usr/local/bin/flux-op
+
 # No default command by design: the executor always supplies argv, and an accidental
 # `docker run` of this image should do nothing.
 ENTRYPOINT []
