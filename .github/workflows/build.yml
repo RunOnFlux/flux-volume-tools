@@ -89,66 +89,126 @@ jobs:
             fi
           }
 
+          # The identifier FluxOS passes. Its exact shape is what lets the boot
+          # sweep tell this script's artefacts from a folder a user named.
+          ID=3f2504e0-4f89-41d3-9a0c-0305e82c3301
+          FO="flux-op --id $ID --root /w"
+
           op "a failed command leaves the destination untouched" '
             mkdir -p /w && echo original > /w/dest
-            flux-op /w/.flux-op-1 /w/dest -- false 2>/dev/null && exit 1
+            '"$FO"' --discard-staging /w/.flux-op-1 /w/dest -- false 2>/dev/null && exit 1
             grep -qx original /w/dest'
 
           op "a directory replaces an existing file" '
             mkdir -p /w/src && echo new > /w/src/f && echo original > /w/dest
-            flux-op /w/.flux-op-2 /w/dest -- cp -a -T /w/src /w/.flux-op-2
+            '"$FO"' --discard-staging /w/.flux-op-2 /w/dest -- cp -a -T /w/src /w/.flux-op-2
             grep -qx new /w/dest/f'
 
           op "a directory replaces an existing directory, and does not merge into it" '
             mkdir -p /w/src /w/dest && echo new > /w/src/f && echo old > /w/dest/keep
-            flux-op /w/.flux-op-3 /w/dest -- cp -a -T /w/src /w/.flux-op-3
+            '"$FO"' --discard-staging /w/.flux-op-3 /w/dest -- cp -a -T /w/src /w/.flux-op-3
             grep -qx new /w/dest/f
             test ! -e /w/dest/keep'
 
           op "a file replaces an existing directory" '
             mkdir -p /w && echo new > /w/src && mkdir -p /w/dest && echo old > /w/dest/keep
-            flux-op /w/.flux-op-4 /w/dest -- cp -a -T /w/src /w/.flux-op-4
+            '"$FO"' --discard-staging /w/.flux-op-4 /w/dest -- cp -a -T /w/src /w/.flux-op-4
             grep -qx new /w/dest'
 
           op "a new destination leaves no staging or swap directory behind" '
             mkdir -p /w/src && echo new > /w/src/f
-            flux-op /w/.flux-op-5 /w/dest -- cp -a -T /w/src /w/.flux-op-5
+            '"$FO"' --discard-staging /w/.flux-op-5 /w/dest -- cp -a -T /w/src /w/.flux-op-5
             grep -qx new /w/dest/f
             test -z "$(ls -A /w | grep flux- || true)"'
 
           op "--mkdir creates the staging directory for commands that need one" '
             mkdir -p /w/src && echo x > /w/src/f && tar -cf /w/a.tar -C /w src
-            flux-op --mkdir /w/.flux-op-6 /w/out -- tar -xf /w/a.tar -C /w/.flux-op-6
+            '"$FO"' --discard-staging --mkdir /w/.flux-op-6 /w/out -- tar -xf /w/a.tar -C /w/.flux-op-6
             grep -qx x /w/out/src/f'
 
           op "a result over the byte ceiling is refused and its staging removed" '
             # Checked after the command rather than from what an archive claims
             # about itself - those numbers are attacker-written, so a bomb lies.
             mkdir -p /w/src && head -c 2000 /dev/zero > /w/src/big
-            flux-op --max-bytes 1000 /w/.flux-op-8 /w/dest -- cp -a -T /w/src /w/.flux-op-8 2>/dev/null && exit 1
+            '"$FO"' --discard-staging --max-bytes 1000 /w/.flux-op-8 /w/dest -- cp -a -T /w/src /w/.flux-op-8 2>/dev/null && exit 1
             test ! -e /w/dest
             test ! -e /w/.flux-op-8'
 
           op "a result containing a link is refused" '
             mkdir -p /w/src && ln -s /etc/shadow /w/src/link
-            flux-op --no-links /w/.flux-op-9 /w/dest -- cp -a -T /w/src /w/.flux-op-9 2>/dev/null && exit 1
+            '"$FO"' --discard-staging --no-links /w/.flux-op-9 /w/dest -- cp -a -T /w/src /w/.flux-op-9 2>/dev/null && exit 1
             test ! -e /w/dest'
 
           op "a failed command leaves no staging behind" '
             mkdir -p /w/src && echo x > /w/src/f
-            flux-op /w/.flux-op-10 /w/dest -- false 2>/dev/null && exit 1
+            '"$FO"' --discard-staging /w/.flux-op-10 /w/dest -- false 2>/dev/null && exit 1
             test ! -e /w/.flux-op-10'
 
-          op "a publish records where the displaced data belongs before moving it" '
-            # Without the marker, a crash between the two renames leaves the
-            # only copy of the previous data under a name that says nothing
-            # about where it came from, and the sweep deletes it.
-            mkdir -p /w/src /w/dest && echo new > /w/src/f && echo precious > /w/dest/keep
-            cp -a -T /w/src /w/.flux-op-7
-            printf "%s\n" /w/dest > /w/.flux-old-7.dest
-            mv -T /w/dest /w/.flux-old-7
-            grep -qx /w/dest /w/.flux-old-7.dest
-            grep -qx precious /w/.flux-old-7/keep'
+          # A move and a rename have NO command: the caller's source already IS
+          # the result, so publishing it is the whole operation. Every case
+          # above supplies one, which is how a usage check that demanded four
+          # positional arguments rejected every move without anything noticing.
+          op "a move publishes with no command at all" '
+            mkdir -p /w/photos && echo hi > /w/photos/f
+            '"$FO"' /w/photos /w/out --
+            test -f /w/out/f
+            test ! -e /w/photos'
+
+          op "a move over an existing destination swaps it aside and cleans up" '
+            mkdir -p /w/photos && echo new > /w/photos/f && echo old > /w/out
+            '"$FO"' /w/photos /w/out --
+            grep -qx new /w/out/f
+            test -z "$(ls -A /w | grep flux- || true)"'
+
+          # Staging is only ever discarded when the caller says it owns it. A
+          # move'"'"'s operand is the user'"'"'s own data, and discarding it on a
+          # failure would destroy the only copy.
+          op "a failure never discards an operand the caller still owns" '
+            mkdir -p /w/photos && echo precious > /w/photos/f
+            '"$FO"' --max-bytes 1 /w/photos /w/dest -- true 2>/dev/null && exit 1
+            grep -qx precious /w/photos/f'
+
+          # SIGTERM must reach the command and the staging directory must go
+          # with it. An untrapped TERM kills the shell outright and the EXIT
+          # trap never runs, leaving the space spent on the caller'"'"'s volume
+          # until the next boot sweep.
+          op "a cancelled operation stops its command and reclaims its staging" '
+            mkdir -p /w && echo original > /w/dest
+            '"$FO"' --discard-staging --mkdir /w/.flux-op-11 /w/dest -- sleep 30 &
+            pid=$!
+            sleep 1
+            kill -TERM $pid
+            wait $pid 2>/dev/null
+            sleep 1
+            test ! -e /w/.flux-op-11
+            grep -qx original /w/dest
+            test -z "$(pgrep -x sleep || true)"'
+
+          # The crash BETWEEN the two renames of a publish - the state the
+          # marker exists for. Reproduced with a stub mv that fails on its
+          # second call, rather than by hand: a fixture built by hand asserts
+          # itself, and would pass even if flux-op wrote no marker at all.
+          op "an interrupted publish leaves a relative marker at the volume root" '
+            mkdir -p /stub
+            real=$(command -v mv)
+            printf "%s\n" "#!/bin/sh" "if [ -e /tmp/mv1 ]; then exit 1; fi" "touch /tmp/mv1" "exec $real \"\$@\"" > /stub/mv
+            chmod +x /stub/mv
+            mkdir -p /w/a/b/photos /w/x/y && echo new > /w/a/b/photos/f && echo precious > /w/x/y/out
+            PATH=/stub:$PATH '"$FO"' /w/a/b/photos /w/x/y/out -- 2>/dev/null && exit 1
+            # relative to the volume root, so nothing that reads it can be sent
+            # off the volume by following an absolute path
+            grep -qx x/y/out /w/.flux-old-'"$ID"'.dest
+            # at the root, which is the one directory the sweep reads - not
+            # beside the source, wherever the caller happened to keep it
+            test ! -e /w/a/b/.flux-old-'"$ID"'
+            grep -qx precious /w/.flux-old-'"$ID"'
+            # and the caller still has their source
+            grep -qx new /w/a/b/photos/f'
+
+          op "the identifier and the volume root are required" '
+            mkdir -p /w
+            flux-op /w/.flux-op-12 /w/dest -- true 2>/dev/null && exit 1
+            test $? -ne 0'
 
   publish:
     needs: smoke-test

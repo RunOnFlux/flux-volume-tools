@@ -53,12 +53,34 @@ an unprivileged system user is meant to remove.
 ## `flux-op` — publishing a result atomically
 
 ```
-flux-op [--mkdir] [--max-bytes N] [--no-links] <staging> <destination> -- <command> [args...]
+flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] [--max-bytes N] [--no-links] \
+        <staging> <destination> -- [command [args...]]
 ```
 
 The command writes into `<staging>`, never into `<destination>`. Only on success
 is the result moved into place. A command that fails, a container that is killed,
 and a node that loses power all leave `<destination>` exactly as it was.
+
+**The command may be empty**, and that is how a move and a rename are expressed:
+the caller's source already *is* the result, so publishing it is the whole
+operation.
+
+`--id` and `--root` name what an interrupted publish leaves behind and where —
+`<root>/.flux-old-<id>` and its marker. Neither is derived from `<staging>`,
+because `<staging>` is not always something this script created: for a move it is
+the caller's own path, at whatever depth they keep it. A name derived from it is
+indistinguishable from a folder the user chose, and a location derived from it
+lands outside the one directory the sweep reads.
+
+`--discard-staging` says the staging operand is scratch this operation created,
+so a failure may throw it away. **Without it, staging is never deleted** — for a
+move that operand is the only copy of the caller's data. Opt-in rather than
+opt-out, because the safe behaviour has to be the one a forgetful caller gets.
+
+A cancellation arrives as `SIGTERM` (docker `stop`, not `kill`). The command runs
+as a child so this script survives to trap it, forwards the signal — a container
+stop reaches only PID 1 — and reclaims staging before exiting. `SIGKILL` bypasses
+all of that, and the startup sweep remains the backstop for it.
 
 Publishing goes through a swap — move the old entry aside, move the new one in,
 delete the old — rather than a delete-then-rename. `rename(2)` refuses a
@@ -80,6 +102,13 @@ The `.dest` marker is written *before* the old entry is moved aside. Without it 
 crash between the two renames would leave the caller's only copy of that data
 under a name that says nothing about where it came from, and the sweep would
 delete it.
+
+It records the destination **relative to `--root`**. The marker sits in a
+directory the app owner can write to, so its contents are input rather than
+state: an absolute path in there is a path a privileged reader might follow off
+the volume. Whoever reads it still has to refuse traversal — `..` is expressible
+in a relative path too — but the class that cannot be written down does not have
+to be checked for.
 
 `--max-bytes` caps what the command may leave in staging, and `--no-links`
 refuses a result containing symlinks or hard links. Both are checked **after**
