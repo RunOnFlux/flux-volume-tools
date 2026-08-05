@@ -1,0 +1,2 @@
+# `go build ./...` leaves the binary here; the image builds it in its own stage.
+/flux-op

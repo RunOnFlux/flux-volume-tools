@@ -20,6 +20,30 @@ env:
   IMAGE: ghcr.io/runonflux/flux-volume-tools
 
 jobs:
+  # flux-op's own logic, reachable without a container in the way. The shell
+  # implementation this replaced could only be exercised through one, which is
+  # how it shipped handing every command it ran /dev/null as its standard input.
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Assert the source is formatted
+        run: |
+          unformatted="$(gofmt -l cmd)"
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd: $unformatted"
+            exit 1
+          fi
+
+      - run: go vet ./...
+
+      - run: go test ./... -race
+
   # Asserts each binary is the implementation the executor relies on. A change in
   # Alpine's packaging fails the build here rather than shipping a busybox applet.
   smoke-test:
@@ -185,25 +209,33 @@ jobs:
             test -z "$(pgrep -x sleep || true)"'
 
           # The crash BETWEEN the two renames of a publish - the state the
-          # marker exists for. Reproduced with a stub mv that fails on its
-          # second call, rather than by hand: a fixture built by hand asserts
-          # itself, and would pass even if flux-op wrote no marker at all.
+          # marker exists for. Reproduced by publishing a staging path that does
+          # not exist: the first rename moves the caller's data aside and the
+          # second has nothing to put in its place, which is where a crash
+          # lands. Deterministic, and it drives the real publish rather than a
+          # state assembled by hand that would pass even if no marker were
+          # written at all.
           op "an interrupted publish leaves a relative marker at the volume root" '
-            mkdir -p /stub
-            real=$(command -v mv)
-            printf "%s\n" "#!/bin/sh" "if [ -e /tmp/mv1 ]; then exit 1; fi" "touch /tmp/mv1" "exec $real \"\$@\"" > /stub/mv
-            chmod +x /stub/mv
-            mkdir -p /w/a/b/photos /w/x/y && echo new > /w/a/b/photos/f && echo precious > /w/x/y/out
-            PATH=/stub:$PATH '"$FO"' /w/a/b/photos /w/x/y/out -- 2>/dev/null && exit 1
+            mkdir -p /w/a/b /w/x/y && echo precious > /w/x/y/out
+            '"$FO"' /w/a/b/photos /w/x/y/out -- 2>/dev/null && exit 1
             # relative to the volume root, so nothing that reads it can be sent
             # off the volume by following an absolute path
             grep -qx x/y/out /w/.flux-old-'"$ID"'.dest
             # at the root, which is the one directory the sweep reads - not
-            # beside the source, wherever the caller happened to keep it
-            test ! -e /w/a/b/.flux-old-'"$ID"'
+            # beside the destination, wherever the caller happened to keep it
+            test ! -e /w/x/y/.flux-old-'"$ID"'
+            # the caller previous data is intact and placeable
             grep -qx precious /w/.flux-old-'"$ID"'
-            # and the caller still has their source
-            grep -qx new /w/a/b/photos/f'
+            test ! -e /w/x/y/out'
+
+          # The command must receive what the caller sent. The shell
+          # implementation ran it as a background job, which POSIX gives
+          # /dev/null as its standard input, so an upload piped in arrived
+          # nowhere and nothing reported an error.
+          op "a command receives the caller standard input" '
+            mkdir -p /w
+            printf "the callers bytes" | '"$FO"' --discard-staging /w/.flux-op-24 /w/dest -- dd of=/w/.flux-op-24 status=none
+            grep -qx "the callers bytes" /w/dest'
 
           op "the identifier and the volume root are required" '
             mkdir -p /w
