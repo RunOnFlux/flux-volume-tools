@@ -7,6 +7,15 @@ import (
 	"testing"
 )
 
+// withStdin points this process's standard input at a file holding contents,
+// for the duration of one test.
+func withStdin(t *testing.T, contents string) {
+	t.Helper()
+	original := os.Stdin
+	os.Stdin = fileHolding(t, contents)
+	t.Cleanup(func() { os.Stdin = original })
+}
+
 // A volume with the operands the tests below share.
 type volume struct {
 	root        string
@@ -54,6 +63,8 @@ func TestUsageIsRefusedWithoutRunningAnything(t *testing.T) {
 		{"no volume root", []string{"--id", testID, v.staging, v.destination, "--"}},
 		{"no operands", []string{"--id", testID, "--root", v.root}},
 		{"no -- before the command", []string{"--id", testID, "--root", v.root, v.staging, v.destination, "true"}},
+		{"input and a command together", v.argv("--from-stdin", "true")},
+		{"input into a staging directory", v.argv("--from-stdin", "--mkdir")},
 	}
 
 	for _, testCase := range cases {
@@ -146,5 +157,54 @@ func TestAResultContainingALinkIsRefused(t *testing.T) {
 	}
 	if _, err := os.Lstat(v.destination); err == nil {
 		t.Error("the destination was published despite the refusal")
+	}
+}
+
+// The upload path: no child process, so nothing can exit successfully having
+// read half a stream.
+func TestInputIsWrittenIntoStagingAndPublished(t *testing.T) {
+	v := newVolume(t)
+	withStdin(t, "uploaded content")
+
+	if code := run(v.argv("--discard-staging", "--from-stdin")); code != 0 {
+		t.Fatalf("exit %d, want 0", code)
+	}
+	if got := read(t, v.destination); got != "uploaded content" {
+		t.Errorf("destination holds %q", got)
+	}
+	if left := v.leftovers(t); len(left) != 0 {
+		t.Errorf("left behind %v", left)
+	}
+}
+
+func TestInputOverTheCeilingIsRefusedAndNothingIsPublished(t *testing.T) {
+	v := newVolume(t)
+	write(t, v.destination, "original")
+	withStdin(t, strings.Repeat("x", 5000))
+
+	if code := run(v.argv("--discard-staging", "--from-stdin", "--max-bytes", "1000")); code != exitTooLarge {
+		t.Fatalf("exit %d, want %d", code, exitTooLarge)
+	}
+	if got := read(t, v.destination); got != "original" {
+		t.Errorf("destination holds %q, want original", got)
+	}
+	if left := v.leftovers(t); len(left) != 0 {
+		t.Errorf("left behind %v", left)
+	}
+}
+
+func TestInputReplacesAnExistingDestination(t *testing.T) {
+	v := newVolume(t)
+	write(t, v.destination, "old")
+	withStdin(t, "new")
+
+	if code := run(v.argv("--discard-staging", "--from-stdin")); code != 0 {
+		t.Fatalf("exit %d, want 0", code)
+	}
+	if got := read(t, v.destination); got != "new" {
+		t.Errorf("destination holds %q, want new", got)
+	}
+	if left := v.leftovers(t); len(left) != 0 {
+		t.Errorf("left behind %v", left)
 	}
 }

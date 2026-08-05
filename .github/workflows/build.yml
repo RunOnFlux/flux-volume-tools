@@ -228,6 +228,35 @@ jobs:
             grep -qx precious /w/.flux-old-'"$ID"'
             test ! -e /w/x/y/out'
 
+          # An upload streamed into the container. There is no child process, so
+          # nothing can exit successfully having read half a stream: the
+          # transfer ends when the caller closes the stream.
+          op "a streamed upload is written into staging and published" '
+            mkdir -p /w
+            printf uploaded | '"$FO"' --discard-staging --from-stdin /w/.flux-op-20 /w/dest --
+            grep -qx uploaded /w/dest
+            test -z "$(ls -A /w | grep flux- || true)"'
+
+          op "a streamed upload replaces an existing destination" '
+            mkdir -p /w && echo old > /w/dest
+            printf new | '"$FO"' --discard-staging --from-stdin /w/.flux-op-21 /w/dest --
+            grep -qx new /w/dest
+            test -z "$(ls -A /w | grep flux- || true)"'
+
+          # The ceiling is exact on this path, because flux-op is the writer.
+          # A command produces its own bytes, so its result can only be measured
+          # after the fact - an extraction fills the volume and is then refused.
+          op "a streamed upload stops at the ceiling and publishes nothing" '
+            mkdir -p /w && echo original > /w/dest
+            head -c 4000 /dev/zero | '"$FO"' --discard-staging --from-stdin --max-bytes 1000 /w/.flux-op-22 /w/dest -- 2>/dev/null && exit 1
+            grep -qx original /w/dest
+            test -z "$(ls -A /w | grep flux- || true)"'
+
+          op "a streamed upload takes no command" '
+            mkdir -p /w
+            printf x | '"$FO"' --from-stdin /w/.flux-op-23 /w/dest -- true 2>/dev/null && exit 1
+            test ! -e /w/dest'
+
           # The command must receive what the caller sent. The shell
           # implementation ran it as a background job, which POSIX gives
           # /dev/null as its standard input, so an upload piped in arrived

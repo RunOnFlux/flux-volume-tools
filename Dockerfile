@@ -1,9 +1,9 @@
 # Minimal userland for FluxOS app-volume file operations.
 #
 # The FluxOS volume executor runs each filesystem operation - copy, move, compress,
-# extract, mkdir, remove - in a throwaway container built from this image, with only
-# the target app volume bind-mounted, a read-only rootfs and no network. Nothing here
-# is a long-running service, and the image holds no FluxOS code.
+# extract, upload, mkdir, remove - in a throwaway container built from this image,
+# with only the target app volume bind-mounted, a read-only rootfs and no network.
+# Nothing here is a long-running service, and the image holds no FluxOS code.
 
 # Built on the NATIVE platform and cross-compiled to the target, rather than
 # compiled under emulation once per architecture. flux-op needs no cgo, so this
@@ -43,10 +43,11 @@ FROM alpine:3.24
 # -T, so this one is about predictable behaviour rather than a missing flag.
 RUN apk add --no-cache coreutils tar zip unzip
 
-# Runs a command into a staging directory and publishes the result with an atomic
-# rename, so an operation that fails, is cancelled, or is interrupted by a power
-# cut leaves the caller's data exactly as it was. Living in the image means one
-# container does the work AND the publish; see the source for why that matters.
+# Runs a command into a staging directory - or writes the caller's own stream
+# into one - and publishes the result with an atomic rename, so an operation that
+# fails, is cancelled, or is interrupted by a power cut leaves the caller's data
+# exactly as it was. Living in the image means one container does the work AND
+# the publish; see the source for why that matters.
 #
 # Statically linked, so nothing installed above can change how it behaves.
 COPY --from=build --chmod=0755 /flux-op /usr/local/bin/flux-op

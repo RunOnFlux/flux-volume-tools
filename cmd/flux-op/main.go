@@ -1,7 +1,7 @@
 // Command flux-op runs one file operation and publishes its result atomically.
 //
 //	flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] [--max-bytes N]
-//	        [--no-links] <staging> <destination> -- [command [args...]]
+//	        [--no-links] [--from-stdin] <staging> <destination> -- [command [args...]]
 //
 // --id and --root together decide where the artefacts of an interrupted publish
 // land and what they are called: <root>/.flux-old-<id> and its .dest marker.
@@ -51,6 +51,7 @@ type options struct {
 	makeStaging    bool
 	maxBytes       int64
 	noLinks        bool
+	fromStdin      bool
 
 	staging     string
 	destination string
@@ -58,7 +59,7 @@ type options struct {
 }
 
 const usage = "flux-op: usage: flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] " +
-	"[--max-bytes N] [--no-links] <staging> <destination> -- [command [args...]]"
+	"[--max-bytes N] [--no-links] [--from-stdin] <staging> <destination> -- [command [args...]]"
 
 func main() {
 	// os.Exit skips deferred functions, so everything that has to run on the way
@@ -87,15 +88,21 @@ func parse(argv []string) (*options, error) {
 	// one a forgetful caller gets.
 	flags.BoolVar(&opts.discardStaging, "discard-staging", false, "staging is scratch and may be discarded")
 	flags.BoolVar(&opts.makeStaging, "mkdir", false, "create the staging directory first")
-	// A ceiling on what the operation may leave in staging. Checked after the
-	// command runs rather than from what an archive declares about itself:
-	// those numbers are written by whoever made the archive, so a bomb lies.
+	// A ceiling on what the operation may leave in staging. For a command it is
+	// checked afterwards, because the bytes are written by another program and
+	// an archive's declared size is written by whoever built it. For --from-stdin
+	// it is enforced as the bytes arrive, because this program is the writer.
 	flags.Int64Var(&opts.maxBytes, "max-bytes", 0, "refuse a result larger than this")
 	// Refuse a result containing links. An archive that carries a symlink and
 	// then writes through it reaches wherever the link points; inside this
 	// container that is nowhere useful, but the result is published onto a
 	// volume that other code paths - and other nodes, through sync - do read.
 	flags.BoolVar(&opts.noLinks, "no-links", false, "refuse a result containing links")
+	// The caller streams the content in rather than naming a command to produce
+	// it. There is no child process at all, so nothing can exit successfully on
+	// a short read: the transfer ends when the caller closes the stream, and the
+	// caller closes it only when it has sent everything.
+	flags.BoolVar(&opts.fromStdin, "from-stdin", false, "write this program's standard input into staging")
 
 	if err := flags.Parse(argv); err != nil {
 		return nil, errUsage
@@ -111,6 +118,13 @@ func parse(argv []string) (*options, error) {
 		return nil, errors.New("flux-op: expected -- before the command")
 	}
 	opts.command = rest[3:]
+
+	if opts.fromStdin && len(opts.command) > 0 {
+		return nil, errors.New("flux-op: --from-stdin takes no command")
+	}
+	if opts.fromStdin && opts.makeStaging {
+		return nil, errors.New("flux-op: --from-stdin writes a file, so it cannot also create staging as a directory")
+	}
 
 	return opts, nil
 }
@@ -151,6 +165,16 @@ func run(argv []string) int {
 	}
 
 	switch {
+	case opts.fromStdin:
+		if _, err := receive(os.Stdin, opts.staging, opts.maxBytes); err != nil {
+			if errors.Is(err, errOverCeiling) {
+				fmt.Fprintf(os.Stderr, "flux-op: input is over the %d byte limit\n", opts.maxBytes)
+				return exitTooLarge
+			}
+			fmt.Fprintf(os.Stderr, "flux-op: could not write the incoming data: %v\n", err)
+			return 1
+		}
+
 	case len(opts.command) > 0:
 		status, canceled, err := runChild(opts.command, os.Stdin, os.Stdout, os.Stderr)
 		if err != nil {
@@ -175,18 +199,22 @@ func run(argv []string) int {
 	// about itself, because those numbers are written by whoever built the
 	// archive and a bomb simply lies.
 	if opts.maxBytes > 0 || opts.noLinks {
-		result, err := inspect(opts.staging)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "flux-op: could not inspect the result: %v\n", err)
-			return 1
-		}
-		if opts.maxBytes > 0 && result.bytes > opts.maxBytes {
-			fmt.Fprintf(os.Stderr, "flux-op: result is %d bytes, over the %d limit\n", result.bytes, opts.maxBytes)
-			return exitTooLarge
-		}
-		if opts.noLinks && result.hasLinks {
-			fmt.Fprintln(os.Stderr, "flux-op: result contains links, which are not accepted here")
-			return exitHasLinks
+		// --from-stdin has already enforced its own ceiling as it wrote, and
+		// cannot produce a link.
+		if !opts.fromStdin {
+			result, err := inspect(opts.staging)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "flux-op: could not inspect the result: %v\n", err)
+				return 1
+			}
+			if opts.maxBytes > 0 && result.bytes > opts.maxBytes {
+				fmt.Fprintf(os.Stderr, "flux-op: result is %d bytes, over the %d limit\n", result.bytes, opts.maxBytes)
+				return exitTooLarge
+			}
+			if opts.noLinks && result.hasLinks {
+				fmt.Fprintln(os.Stderr, "flux-op: result contains links, which are not accepted here")
+				return exitHasLinks
+			}
 		}
 	}
 
