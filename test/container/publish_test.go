@@ -3,7 +3,11 @@
 package container
 
 import (
+	"errors"
+	"os/exec"
+	"strings"
 	"testing"
+	"time"
 )
 
 // The contract: the destination changes only on success, and it changes
@@ -231,6 +235,66 @@ func TestStagingIsCreatedForCommandsThatNeedIt(t *testing.T) {
 	if got := contents(t, volume, "out/src/f"); got != "x" {
 		t.Errorf("extracted content is %q", got)
 	}
+}
+
+// Cancelling an operation has to reach the command, not just the process
+// supervising it.
+//
+// A container stop delivers SIGTERM to PID 1 only, so an unforwarded signal
+// leaves the command writing into a staging directory nobody will publish. And
+// an untrapped one kills the supervisor outright, so its cleanup never runs and
+// the space stays spent on a volume the caller pays for until the next boot
+// sweep.
+//
+// Driven with `docker stop`, which is what FluxOS issues - not by signalling a
+// process on this side of the container.
+func TestACancelledOperationStopsItsCommandAndReclaimsStaging(t *testing.T) {
+	volume := volumeDir(t)
+	seed(t, volume, `echo original > /work/dest`)
+
+	name := "flux-op-cancel-" + strings.ReplaceAll(t.Name(), "/", "-")
+	staging := "/work/.flux-op-" + operationID
+
+	argv := append([]string{"run", "--name", name}, executorConfig(volume)...)
+	argv = append(argv, image(), "flux-op")
+	argv = append(argv, baseArgs("--discard-staging", "--mkdir", staging, "/work/dest", "--", "sleep", "30")...)
+
+	cmd := exec.Command("docker", argv...)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("could not start the container: %v", err)
+	}
+	t.Cleanup(func() { exec.Command("docker", "rm", "-f", name).Run() })
+
+	// Wait for the operation to actually be under way, so the stop cannot
+	// arrive before there is anything to stop.
+	deadline := time.Now().Add(30 * time.Second)
+	for !exists(volume, ".flux-op-"+operationID) {
+		if time.Now().After(deadline) {
+			t.Fatal("the operation never created its staging directory")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if out, err := exec.Command("docker", "stop", "--time", "15", name).CombinedOutput(); err != nil {
+		t.Fatalf("could not stop the container: %v\n%s", err, out)
+	}
+
+	err := cmd.Wait()
+	var exitErr *exec.ExitError
+	if err == nil {
+		t.Fatal("a cancelled operation reported success")
+	}
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("unexpected failure: %v", err)
+	}
+	if exitErr.ExitCode() != 143 {
+		t.Errorf("exit %d, want 143 - which is what tells a cancelled operation from a failed one", exitErr.ExitCode())
+	}
+
+	if got := contents(t, volume, "dest"); got != "original" {
+		t.Errorf("destination holds %q, want original", got)
+	}
+	requireNoArtefacts(t, volume)
 }
 
 func TestTheIdentifierAndVolumeRootAreRequired(t *testing.T) {
