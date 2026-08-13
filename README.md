@@ -53,7 +53,7 @@ an unprivileged system user is meant to remove.
 ## `flux-op` — publishing a result atomically
 
 ```
-flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] [--max-bytes N] [--no-links] \
+flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] [--max-bytes N] [--ordinary-only] \
         <staging> <destination> -- [command [args...]]
 ```
 
@@ -110,8 +110,12 @@ the volume. Whoever reads it still has to refuse traversal — `..` is expressib
 in a relative path too — but the class that cannot be written down does not have
 to be checked for.
 
-`--max-bytes` caps what the command may leave in staging, and `--no-links`
-refuses a result containing symlinks or hard links. Both are checked **after**
+`--max-bytes` caps what the command may leave in staging, and `--ordinary-only`
+refuses a result holding anything that is not ordinary data — symlinks and hard
+links, which reach outside the result, and FIFOs, sockets and device nodes,
+which are not data at all. A FIFO matters as much as a link: whatever opens one
+without `O_NONBLOCK` waits for a writer that never comes, and `tar` both carries
+and recreates them. Both are checked **after**
 the command runs rather than from what an archive declares about itself: those
 figures are written by whoever built the archive, so a bomb simply lies about
 them. Staging is discarded on breach and the destination is never touched.

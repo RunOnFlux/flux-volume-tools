@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -24,7 +25,7 @@ func TestInspectCountsEveryFileInTheTree(t *testing.T) {
 	if before.bytes < 350 {
 		t.Errorf("measured %d bytes, want at least the 350 of file content", before.bytes)
 	}
-	if before.hasLinks {
+	if before.hasIrregular {
 		t.Error("a tree with no links reported links")
 	}
 
@@ -60,7 +61,7 @@ func TestInspectFindsASymlinkAndDoesNotFollowIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.hasLinks {
+	if !result.hasIrregular {
 		t.Error("the symlink was not reported")
 	}
 	if result.bytes > 10000 {
@@ -84,7 +85,7 @@ func TestInspectDoesNotDescendThroughALinkedDirectory(t *testing.T) {
 
 	select {
 	case result := <-done:
-		if !result.hasLinks {
+		if !result.hasIrregular {
 			t.Error("the linked directory was not reported as a link")
 		}
 	case <-timeoutAfterSeconds(10):
@@ -103,7 +104,7 @@ func TestInspectCountsHardLinkedDataOnceAndReportsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if before.hasLinks {
+	if before.hasIrregular {
 		t.Fatal("a tree with one ordinary file reported links")
 	}
 
@@ -115,7 +116,7 @@ func TestInspectCountsHardLinkedDataOnceAndReportsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !after.hasLinks {
+	if !after.hasIrregular {
 		t.Error("the hard link was not reported")
 	}
 	if grew := after.bytes - before.bytes; grew >= 5000 {
@@ -144,7 +145,7 @@ func TestInspectMeasuresASingleFile(t *testing.T) {
 	if result.bytes != 1234 {
 		t.Errorf("measured %d bytes, want 1234", result.bytes)
 	}
-	if result.hasLinks {
+	if result.hasIrregular {
 		t.Error("a plain file reported links")
 	}
 }
@@ -199,5 +200,43 @@ func TestInspectSkipsWhatItCannotRead(t *testing.T) {
 	// stopping at the entry it could not open.
 	if result.bytes < 100 {
 		t.Errorf("measured %d bytes, want at least the 100 it could read", result.bytes)
+	}
+}
+
+// A link is not the only entry that is not ordinary data. A FIFO carries none at
+// all: whatever opens it without O_NONBLOCK waits for a writer that is never
+// coming, and tar both carries and recreates one - so an archive is all it takes
+// to put one on the volume.
+//
+// Device nodes cannot be made here, because CAP_MKNOD is dropped. FIFOs and
+// sockets need no capability at all.
+func TestInspectFindsAnEntryThatIsNotOrdinaryData(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, "ordinary"), "data")
+	if err := syscall.Mkfifo(filepath.Join(root, "pipe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := inspect(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.hasIrregular {
+		t.Error("a FIFO in the result was not reported, so --ordinary-only would publish it")
+	}
+}
+
+// The directory holding the result is itself not a regular file, and refusing it
+// would refuse every extraction there is.
+func TestInspectDoesNotCallADirectoryIrregular(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, "nested", "deeper", "file"), "data")
+
+	result, err := inspect(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.hasIrregular {
+		t.Error("an ordinary tree of files and directories was refused")
 	}
 }

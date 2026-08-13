@@ -13,9 +13,15 @@ type inspection struct {
 	// targets symlinks name - counting anything hard-linked once. This is what
 	// `du -sb` reports, and the ceiling has always been expressed against it.
 	bytes int64
-	// Whether the tree holds a symlink, or a regular file with more than one
-	// name. Either lets a published result reach something outside itself.
-	hasLinks bool
+	// Whether the tree holds anything that is not ordinary data. Two kinds
+	// qualify and for different reasons: a link REACHES something outside
+	// itself, and a FIFO, socket or device node IS not data at all - whatever
+	// opens a FIFO without O_NONBLOCK waits for a writer that never comes.
+	//
+	// Device nodes cannot be created in the executor's container, which drops
+	// CAP_MKNOD. FIFOs and sockets need no capability, and tar both carries and
+	// recreates a FIFO - so an archive is all it takes.
+	hasIrregular bool
 }
 
 // inspect walks the result once and answers both questions the publish gates on.
@@ -71,13 +77,18 @@ func inspect(root string) (inspection, error) {
 			return nil
 		}
 
-		if entry.Type()&fs.ModeSymlink != 0 {
-			result.hasLinks = true
+		// A directory is the shape of the result itself, so it is ordinary here
+		// even though it is not a regular file. Everything else that is neither
+		// is refused: symlinks, FIFOs, sockets and device nodes alike.
+		if !entry.Type().IsRegular() && !entry.IsDir() {
+			result.hasIrregular = true
 		}
 
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if ok && info.Mode().IsRegular() && uint64(stat.Nlink) > 1 {
-			result.hasLinks = true
+			// A second name for the same data, and the other one may be
+			// somewhere this result does not reach.
+			result.hasIrregular = true
 
 			key := [2]uint64{uint64(stat.Dev), uint64(stat.Ino)}
 			if _, counted := seen[key]; counted {

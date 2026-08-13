@@ -119,7 +119,7 @@ func TestAResultContainingALinkIsRefused(t *testing.T) {
 
 	staging := "/work/.flux-op-" + operationID
 	result := fluxOp(t, volume, "",
-		append(baseArgs("--discard-staging", "--no-links", staging, "/work/dest", "--"),
+		append(baseArgs("--discard-staging", "--ordinary-only", staging, "/work/dest", "--"),
 			"cp", "-a", "-T", "/work/src", staging)...)
 
 	if result.exit != 4 {

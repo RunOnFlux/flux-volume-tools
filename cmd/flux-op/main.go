@@ -1,7 +1,7 @@
 // Command flux-op runs one file operation and publishes its result atomically.
 //
 //	flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] [--max-bytes N]
-//	        [--no-links] [--from-stdin] <staging> <destination> -- [command [args...]]
+//	        [--ordinary-only] [--from-stdin] <staging> <destination> -- [command [args...]]
 //
 // --id and --root together decide where the artefacts of an interrupted publish
 // land and what they are called: <root>/.flux-old-<id> and its .dest marker.
@@ -46,9 +46,9 @@ var operationIdentifier = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{
 // Exit codes the caller distinguishes. Everything else is the command's own
 // status, passed through unchanged.
 const (
-	exitUsage    = 2
-	exitTooLarge = 3
-	exitHasLinks = 4
+	exitUsage       = 2
+	exitTooLarge    = 3
+	exitNotOrdinary = 4
 	// 128 + SIGTERM, which is what a shell reports for a signalled process and
 	// what FluxOS matches on to tell a cancelled operation from a failed one.
 	exitCanceled = 143
@@ -60,7 +60,7 @@ type options struct {
 	discardStaging bool
 	makeStaging    bool
 	maxBytes       int64
-	noLinks        bool
+	ordinaryOnly   bool
 	fromStdin      bool
 
 	staging     string
@@ -69,7 +69,7 @@ type options struct {
 }
 
 const usage = "flux-op: usage: flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] " +
-	"[--max-bytes N] [--no-links] [--from-stdin] <staging> <destination> -- [command [args...]]"
+	"[--max-bytes N] [--ordinary-only] [--from-stdin] <staging> <destination> -- [command [args...]]"
 
 func main() {
 	// os.Exit skips deferred functions, so everything that has to run on the way
@@ -103,11 +103,16 @@ func parse(argv []string) (*options, error) {
 	// an archive's declared size is written by whoever built it. For --from-stdin
 	// it is enforced as the bytes arrive, because this program is the writer.
 	flags.Int64Var(&opts.maxBytes, "max-bytes", 0, "refuse a result larger than this")
-	// Refuse a result containing links. An archive that carries a symlink and
-	// then writes through it reaches wherever the link points; inside this
-	// container that is nowhere useful, but the result is published onto a
-	// volume that other code paths - and other nodes, through sync - do read.
-	flags.BoolVar(&opts.noLinks, "no-links", false, "refuse a result containing links")
+	// Refuse a result holding anything that is not ordinary data. Two kinds, for
+	// different reasons: a link reaches outside itself - an archive that carries
+	// one and then writes through it reaches wherever it points - and a FIFO or
+	// socket is not data at all, so whatever reads it without O_NONBLOCK waits
+	// for a writer that never comes.
+	//
+	// Inside this container neither is much use, but the result is published
+	// onto a volume that other code paths - and other nodes, through sync - do
+	// read.
+	flags.BoolVar(&opts.ordinaryOnly, "ordinary-only", false, "refuse a result holding anything that is not ordinary data")
 	// The caller streams the content in rather than naming a command to produce
 	// it. There is no child process at all, so nothing can exit successfully on
 	// a short read: the transfer ends when the caller closes the stream, and the
@@ -273,7 +278,7 @@ func run(argv []string) int {
 	// against what actually landed rather than against what the input claimed
 	// about itself, because those numbers are written by whoever built the
 	// archive and a bomb simply lies.
-	if opts.maxBytes > 0 || opts.noLinks {
+	if opts.maxBytes > 0 || opts.ordinaryOnly {
 		// --from-stdin has already enforced its own ceiling as it wrote, and
 		// cannot produce a link.
 		if !opts.fromStdin {
@@ -286,9 +291,9 @@ func run(argv []string) int {
 				fmt.Fprintf(os.Stderr, "flux-op: result is %d bytes, over the %d limit\n", result.bytes, opts.maxBytes)
 				return exitTooLarge
 			}
-			if opts.noLinks && result.hasLinks {
-				fmt.Fprintln(os.Stderr, "flux-op: result contains links, which are not accepted here")
-				return exitHasLinks
+			if opts.ordinaryOnly && result.hasIrregular {
+				fmt.Fprintln(os.Stderr, "flux-op: result holds something that is not ordinary data, which is not accepted here")
+				return exitNotOrdinary
 			}
 		}
 	}

@@ -175,11 +175,11 @@ func TestAResultOverTheCeilingIsRefusedAndReclaimed(t *testing.T) {
 
 func TestAResultContainingALinkIsRefused(t *testing.T) {
 	v := newVolume(t)
-	argv := append(v.argv("--discard-staging", "--mkdir", "--no-links"),
+	argv := append(v.argv("--discard-staging", "--mkdir", "--ordinary-only"),
 		"sh", "-c", "ln -s /etc/hosts "+filepath.Join(v.staging, "link"))
 
-	if code := run(argv); code != exitHasLinks {
-		t.Fatalf("exit %d, want %d", code, exitHasLinks)
+	if code := run(argv); code != exitNotOrdinary {
+		t.Fatalf("exit %d, want %d", code, exitNotOrdinary)
 	}
 	if _, err := os.Lstat(v.destination); err == nil {
 		t.Error("the destination was published despite the refusal")
