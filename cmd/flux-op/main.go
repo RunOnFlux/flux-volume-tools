@@ -29,8 +29,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // Exit codes the caller distinguishes. Everything else is the command's own
@@ -154,6 +156,21 @@ func run(argv []string) int {
 		}
 	}()
 
+	// Asked for across the whole run, not only around a child.
+	//
+	// The executor runs this as PID 1, and the kernel delivers no signal to PID 1
+	// that the process has not asked for. So an unhandled TERM does not end the
+	// program the way it would anywhere else - it is discarded, the Go runtime
+	// gives up and exits 2, and NOTHING unwinds: the reclaim below never runs and
+	// a partial upload is left at a name the app owner cannot see.
+	//
+	// Registering here suppresses that for every phase, including the publish,
+	// where being ended between two renames is the one outcome this program
+	// exists to prevent.
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(signals)
+
 	// Only the commands that need an existing directory to write into ask for
 	// this. A file copy must NOT have it: cp -T refuses to overwrite a directory
 	// with a non-directory.
@@ -166,13 +183,38 @@ func run(argv []string) int {
 
 	switch {
 	case opts.fromStdin:
-		if _, err := receive(os.Stdin, opts.staging, opts.maxBytes); err != nil {
-			if errors.Is(err, errOverCeiling) {
-				fmt.Fprintf(os.Stderr, "flux-op: input is over the %d byte limit\n", opts.maxBytes)
-				return exitTooLarge
+		// There is no child here to forward the signal to, and the read cannot be
+		// interrupted: it wakes when bytes arrive or the sender closes, and a
+		// stalled sender does neither. Closing the descriptor does not help - the
+		// runtime does not poll standard input, so a read already blocked on it
+		// stays blocked, and the container is SIGKILLed at the end of its grace
+		// period with nothing unwound.
+		//
+		// So the transfer is waited ON rather than waited FOR: it runs in its own
+		// goroutine and this one takes whichever arrives first. A cancel then
+		// returns through the ordinary path, which is what runs the reclaim above.
+		// The abandoned goroutine writes into a descriptor whose file is being
+		// unlinked and the process is gone moments later; it creates nothing, so
+		// there is nothing for it to leave behind.
+		transfer := make(chan error, 1)
+		go func() {
+			_, err := receive(os.Stdin, opts.staging, opts.maxBytes)
+			transfer <- err
+		}()
+
+		select {
+		case <-signals:
+			fmt.Fprintln(os.Stderr, "flux-op: cancelled")
+			return exitCanceled
+		case err := <-transfer:
+			if err != nil {
+				if errors.Is(err, errOverCeiling) {
+					fmt.Fprintf(os.Stderr, "flux-op: input is over the %d byte limit\n", opts.maxBytes)
+					return exitTooLarge
+				}
+				fmt.Fprintf(os.Stderr, "flux-op: could not write the incoming data: %v\n", err)
+				return 1
 			}
-			fmt.Fprintf(os.Stderr, "flux-op: could not write the incoming data: %v\n", err)
-			return 1
 		}
 
 	case len(opts.command) > 0:
@@ -192,6 +234,16 @@ func run(argv []string) int {
 		// An EMPTY command is legitimate and is how a move is expressed: its
 		// source is already the result, so there is nothing to run and
 		// publishing it is the whole operation.
+	}
+
+	// A signal that arrived during a phase with nothing to interrupt still means
+	// the caller asked for this to stop, and stopping before the publish is what
+	// makes honouring it free.
+	select {
+	case <-signals:
+		fmt.Fprintln(os.Stderr, "flux-op: cancelled")
+		return exitCanceled
+	default:
 	}
 
 	// One pass over the result answers both questions. The ceiling is checked

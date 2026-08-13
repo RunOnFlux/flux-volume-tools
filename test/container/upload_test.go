@@ -3,8 +3,12 @@
 package container
 
 import (
+	"errors"
+	"io"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The command must receive what the caller sent.
@@ -141,4 +145,73 @@ func TestAnEmptyUploadIsAnEmptyFile(t *testing.T) {
 	if got := contents(t, volume, "dest"); got != "" {
 		t.Errorf("destination holds %q, want nothing", got)
 	}
+}
+
+// The twin of TestACancelledOperationStopsItsCommandAndReclaimsStaging, for the
+// path that has no command at all.
+//
+// A stop reaches flux-op itself rather than a child, and during an upload there
+// is no child to forward it to - so unless flux-op handles the signal, the
+// default disposition ends the process where it stands and the deferred reclaim
+// never runs. What is left is a partial upload at a name the app owner cannot
+// see, on a volume with a fixed size, until the next boot sweep.
+//
+// The stream stays OPEN and goes quiet, because that is what a stalled transfer
+// looks like from in here: flux-op is parked in a read with nothing coming, so
+// nothing it could poll would ever be looked at.
+func TestACancelledUploadStopsAndReclaimsStaging(t *testing.T) {
+	volume := volumeDir(t)
+	seed(t, volume, `echo original > /work/dest`)
+
+	name := "flux-op-cancel-upload-" + strings.ReplaceAll(t.Name(), "/", "-")
+	staging := "/work/.flux-op-" + operationID
+
+	argv := append([]string{"run", "--name", name}, executorConfig(volume)...)
+	argv = append(argv, image(), "flux-op")
+	argv = append(argv, baseArgs("--discard-staging", "--from-stdin", staging, "/work/dest", "--")...)
+
+	cmd := exec.Command("docker", argv...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("could not start the container: %v", err)
+	}
+	t.Cleanup(func() { exec.Command("docker", "rm", "-f", name).Run() })
+
+	if _, err := io.WriteString(stdin, "partial upload"); err != nil {
+		t.Fatalf("could not send the first bytes: %v", err)
+	}
+
+	// Under way before it is stopped, so the stop cannot land on an operation
+	// that has not started.
+	deadline := time.Now().Add(30 * time.Second)
+	for !exists(volume, ".flux-op-"+operationID) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the upload never created its staging file\n%s", tree(volume))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if out, err := exec.Command("docker", "stop", "--time", "15", name).CombinedOutput(); err != nil {
+		t.Fatalf("could not stop the container: %v\n%s", err, out)
+	}
+
+	err = cmd.Wait()
+	var exitErr *exec.ExitError
+	if err == nil {
+		t.Fatal("a cancelled upload reported success")
+	}
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("unexpected failure: %v", err)
+	}
+	if exitErr.ExitCode() != 143 {
+		t.Errorf("exit %d, want 143 - which is what tells a cancelled operation from a failed one", exitErr.ExitCode())
+	}
+
+	if got := contents(t, volume, "dest"); got != "original" {
+		t.Errorf("destination holds %q, want original", got)
+	}
+	requireNoArtefacts(t, volume)
 }
