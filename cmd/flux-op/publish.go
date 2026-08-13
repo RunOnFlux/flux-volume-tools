@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // publish moves the result into place.
@@ -30,6 +31,25 @@ import (
 // without something else already being wrong - and a non-atomic publish is
 // exactly what the caller was promised would not occur.
 func publish(staging, destination, root, id string) error {
+	// Neither operand may contain the other, decided before anything moves.
+	//
+	// Displacing the destination takes everything under it, so a destination
+	// that contains staging carries staging away and the second rename finds
+	// nothing - stopping in the interrupted state for an operation that was
+	// never going to work. The caller's whole folder is then parked under a name
+	// the reserved-name rules hide from them, and only the next boot sweep puts
+	// it back. The mirror case cannot be renamed at all: rename(2) refuses to
+	// move a directory into its own subtree.
+	//
+	// Refused rather than made to work. Completing it would mean deleting
+	// everything ELSE in the destination - entries the caller never named, which
+	// merely happened to sit beside the one they did - and that is the outcome
+	// this program exists to prevent. A caller that means "move this up a level"
+	// asks for <parent>/<name>, which is an ordinary publish.
+	if contains(destination, staging) || contains(staging, destination) {
+		return fmt.Errorf("%s and %s contain one another, so publishing one over the other would displace it", staging, destination)
+	}
+
 	// Which object is about to be published, read before anything moves. A
 	// sweep that finds a destination occupied cannot otherwise tell what is
 	// sitting there: the object this publish placed, or one the app owner put
@@ -89,3 +109,17 @@ const (
 	swapPrefix   = ".flux-old-"
 	markerSuffix = ".dest"
 )
+
+// contains reports whether ancestor holds path, or names the same entry.
+//
+// Lexical, because that is the question a rename answers: both paths were
+// resolved by the caller before they were handed over, and rename(2) acts on
+// the path it is given rather than on wherever a link along it might lead.
+func contains(ancestor, path string) bool {
+	cleanAncestor := filepath.Clean(ancestor)
+	cleanPath := filepath.Clean(path)
+	if cleanAncestor == cleanPath {
+		return true
+	}
+	return strings.HasPrefix(cleanPath, cleanAncestor+string(filepath.Separator))
+}
