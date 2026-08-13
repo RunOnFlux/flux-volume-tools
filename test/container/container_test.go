@@ -170,7 +170,11 @@ func identityOf(t *testing.T, volume, name string) string {
 	if result.exit != 0 {
 		t.Fatalf("could not stat %s (exit %d):\n%s", name, result.exit, result.output)
 	}
-	fields := strings.Fields(strings.TrimSpace(result.output))
+	// The last line, not the whole output: running a foreign architecture under
+	// emulation puts a platform warning ahead of it, which is the same noise the
+	// exit code is read past below.
+	lines := strings.Split(strings.TrimSpace(result.output), "\n")
+	fields := strings.Fields(lines[len(lines)-1])
 	if len(fields) != 2 {
 		t.Fatalf("stat of %s returned %q", name, result.output)
 	}
