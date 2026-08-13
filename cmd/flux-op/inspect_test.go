@@ -148,3 +148,27 @@ func TestInspectMeasuresASingleFile(t *testing.T) {
 		t.Error("a plain file reported links")
 	}
 }
+
+// The RESULT itself being a link is a different question from a link inside it,
+// and the ceiling is the reason. A walk that does not follow links measures a
+// link as the few bytes of its own path, so a staging path pointing at a tree of
+// any size measures as nothing and passes any --max-bytes it is given.
+//
+// Not reachable today - FluxOS names staging with a fresh randomUUID the
+// application never learns - but the safety of the ceiling should not rest on
+// the caller having chosen an unguessable name, which is an invariant this
+// program neither states nor can check.
+func TestInspectRefusesAResultThatIsItselfALink(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "elsewhere")
+	write(t, filepath.Join(target, "big"), strings.Repeat("x", 5000))
+
+	staging := filepath.Join(root, "staging")
+	if err := os.Symlink(target, staging); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := inspect(staging); err == nil {
+		t.Fatal("inspecting a result that is a link succeeded")
+	}
+}

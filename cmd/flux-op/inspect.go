@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -35,15 +36,29 @@ type inspection struct {
 func inspect(root string) (inspection, error) {
 	var result inspection
 
-	if _, err := os.Lstat(root); err != nil {
+	info, err := os.Lstat(root)
+	if err != nil {
 		return result, err
+	}
+
+	// The result being a link is a different question from one inside it, and
+	// the ceiling is why. Nothing is followed here, so a link measures as the few
+	// bytes of its own path - and a staging path pointing at a tree of any size
+	// would pass any --max-bytes it was given.
+	//
+	// The caller names staging with an identifier the application never learns,
+	// so nothing can plant a link there today. Refused regardless: the ceiling
+	// should not depend on that name having been unguessable, which is an
+	// invariant this program neither states nor can check.
+	if info.Mode()&fs.ModeSymlink != 0 {
+		return result, fmt.Errorf("%s is a link, not a result to measure", root)
 	}
 
 	// Hard links are counted once, as du counts them, so a tree that names the
 	// same data twice is not measured as twice the space it occupies.
 	seen := make(map[[2]uint64]struct{})
 
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			// A directory that cannot be read contributes nothing and does not
 			// fail the measurement; whether its contents would have breached

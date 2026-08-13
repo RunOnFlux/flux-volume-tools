@@ -347,3 +347,37 @@ func TestPublishRefusesOperandsThatContainOneAnother(t *testing.T) {
 		}
 	})
 }
+
+// The marker names a path derived from --id, and it is written into a directory
+// the application can also write to. A link planted there would be followed, so
+// the record of where the caller's data belongs would be written wherever the
+// link pointed - and the sweep would then find no marker beside the displaced
+// copy and delete it as a duplicate.
+//
+// Not reachable today, because --id is a fresh randomUUID the application never
+// learns. Refused anyway: this program should not depend on its caller having
+// picked an unguessable name for a file it writes as root.
+func TestTheMarkerIsNotWrittenThroughAPlantedLink(t *testing.T) {
+	root := t.TempDir()
+	staging := filepath.Join(root, "staged")
+	destination := filepath.Join(root, "dest")
+	write(t, staging, "the object being published")
+	write(t, destination, "displaced")
+
+	elsewhere := filepath.Join(root, "elsewhere")
+	write(t, elsewhere, "SOMETHING THE CALLER OWNS")
+	if err := os.Symlink(elsewhere, filepath.Join(root, swapPrefix+testID)+markerSuffix); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := publish(staging, destination, root, testID); err == nil {
+		t.Fatal("publishing through a planted marker link succeeded")
+	}
+	if got := read(t, elsewhere); got != "SOMETHING THE CALLER OWNS" {
+		t.Errorf("the link target was written through, and now holds %q", got)
+	}
+	// Refused before the swap, so the caller still has what they had.
+	if got := read(t, destination); got != "displaced" {
+		t.Errorf("the destination holds %q", got)
+	}
+}

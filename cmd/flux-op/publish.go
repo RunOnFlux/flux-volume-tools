@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // publish moves the result into place.
@@ -81,7 +82,7 @@ func publish(staging, destination, root, id string) error {
 	// under `old` with its own path empty, and without this the sweep has no way
 	// to know where to put it back - it would delete the only copy.
 	record := markerContents(destination, root) + "\n" + stagedIdentity + "\n"
-	if err := os.WriteFile(marker, []byte(record), 0o644); err != nil {
+	if err := writeMarker(marker, record); err != nil {
 		return fmt.Errorf("could not record where %s belongs: %w", destination, err)
 	}
 
@@ -122,4 +123,35 @@ func contains(ancestor, path string) bool {
 		return true
 	}
 	return strings.HasPrefix(cleanPath, cleanAncestor+string(filepath.Separator))
+}
+
+// writeMarker writes the record, refusing to follow or replace anything already
+// at that path.
+//
+// O_NOFOLLOW because this sits in a directory the application can write to as
+// well: a link planted here would otherwise be followed, and the record of where
+// the caller's data belongs would land wherever it pointed - leaving the
+// displaced copy with no marker beside it, which the sweep reads as a duplicate
+// and deletes.
+//
+// O_EXCL because the name derives from an identifier that is fresh for every
+// operation. Anything already there is not a marker this operation wrote, and
+// writing over it would destroy whatever it is.
+//
+// Neither is reachable while the caller names operations with an identifier the
+// application never learns. Both are here so that this does not depend on it.
+func writeMarker(path, record string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o644)
+	if err != nil {
+		return err
+	}
+
+	// Checked rather than deferred and dropped: a write can fail at close, and a
+	// marker that is short is a marker the sweep cannot read - which is the one
+	// case that costs the caller their data.
+	if _, err := file.WriteString(record); err != nil {
+		file.Close()
+		return err
+	}
+	return file.Close()
 }
