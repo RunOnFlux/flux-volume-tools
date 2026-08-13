@@ -115,3 +115,33 @@ func TestAResultHoldingAFifoIsRefused(t *testing.T) {
 	}
 	requireNoArtefacts(t, volume)
 }
+
+// A file occupies whole blocks, so an archive of many tiny files consumes
+// thousands of times what it reports. The ceiling handed to an extraction is the
+// volume's free space - a count of blocks - so measuring what the files say
+// would pass an extraction that had already exceeded it many times over.
+//
+// The ceiling here sits between the two figures deliberately: the tree reports a
+// few kilobytes for itself and occupies several megabytes, so a run that
+// measures the wrong one publishes.
+func TestAnArchiveOfManyTinyFilesIsMeasuredByWhatItOccupies(t *testing.T) {
+	volume := volumeDir(t)
+	seed(t, volume, `mkdir -p /work/build/many && cd /work/build/many &&
+		i=0; while [ $i -lt 2000 ]; do printf x > "f$i"; i=$((i+1)); done &&
+		cd /work/build && tar cf /work/archive.tar many`)
+
+	staging := "/work/.flux-op-" + operationID
+	result := fluxOp(t, volume, "", append(
+		baseArgs("--discard-staging", "--mkdir", "--ordinary-only", "--max-bytes", "1000000",
+			staging, "/work/out", "--"),
+		"tar", "xf", "/work/archive.tar", "-C", staging)...)
+
+	if result.exit != 3 {
+		t.Errorf("exit %d, want 3 - the code that says the result was over the ceiling\n%s",
+			result.exit, result.output)
+	}
+	if exists(volume, "out") {
+		t.Errorf("an extraction over the ceiling was published\n%s", tree(volume))
+	}
+	requireNoArtefacts(t, volume)
+}

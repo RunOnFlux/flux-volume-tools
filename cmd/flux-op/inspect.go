@@ -8,10 +8,26 @@ import (
 	"syscall"
 )
 
+// The unit st_blocks is expressed in, fixed by POSIX and unrelated to the
+// filesystem's own block size.
+const blocksAreCountedIn = 512
+
 type inspection struct {
-	// Apparent size of every entry in the tree - files, directories and the
-	// targets symlinks name - counting anything hard-linked once. This is what
-	// `du -sb` reports, and the ceiling has always been expressed against it.
+	// What the tree OCCUPIES on the filesystem it is on, counting anything
+	// hard-linked once. This is what `du` reports by default, not `du -sb`.
+	//
+	// Occupied rather than apparent because of what the figure is FOR: the
+	// ceiling handed to this program is the volume's free space, which is a
+	// count of blocks. Measuring what the files say instead compares two
+	// different kinds of number, and the gap is not small - a file occupies
+	// whole blocks, so twenty thousand one-byte files are 20KB by their own
+	// account and 82MB on an ext4 volume. An extraction of them passed a ceiling
+	// it had already exceeded four thousand times over.
+	//
+	// A sparse file now measures as what it occupies rather than as its length.
+	// That is the right direction here: the promise is that an operation will
+	// not fill the volume, and a sparse file does not. An application can write
+	// into its own holes afterwards, but it can write to its own volume anyway.
 	bytes int64
 	// Whether the tree holds anything that is not ordinary data. Two kinds
 	// qualify and for different reasons: a link REACHES something outside
@@ -97,7 +113,16 @@ func inspect(root string) (inspection, error) {
 			seen[key] = struct{}{}
 		}
 
-		result.bytes += info.Size()
+		if ok {
+			// POSIX counts st_blocks in 512-byte units whatever the filesystem's
+			// own block size is, so this needs no knowledge of the volume.
+			result.bytes += stat.Blocks * blocksAreCountedIn
+		} else {
+			// Nothing else to go on. Only reachable off unix, where this program
+			// does not run - it is here so the walk cannot silently contribute
+			// zero for every entry.
+			result.bytes += info.Size()
+		}
 		return nil
 	})
 

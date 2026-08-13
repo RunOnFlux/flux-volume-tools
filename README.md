@@ -154,12 +154,15 @@ program's doing.
 | a FIFO or socket | refused | `--ordinary-only` |
 | a device node | cannot be created at all | `CAP_MKNOD` is dropped; FluxOS also mounts the volume `nodev` |
 | a setuid binary | the bit survives extraction, and is **inert** | FluxOS mounts the app volume `nosuid` |
+| an archive of many tiny files | refused once what it **occupies** exceeds the ceiling | `--max-bytes`, measured on what landed rather than on what the archive declares |
 | anything reaching off the volume | nowhere to land | no network, read-only rootfs, the volume is the only mount |
 
-Size is deliberately absent from that table. `--max-bytes` bounds what an
-extraction may leave, and it is applied to what actually landed rather than to
-what the archive declares about itself — but stating a bound is not the same as
-proving one, and it is not listed here until it has been.
+The tiny-files row is measured the way `du` reports by default, not `du -sb`. A file
+occupies whole blocks, so twenty thousand one-byte files are 20 KB by their own
+account and 82 MB on an ext4 volume — and the ceiling this is compared against is
+the volume's free space, which is a count of blocks. Measuring what the files say
+would compare two different kinds of number, and pass an extraction that had
+already exceeded the limit four thousand times over.
 
 Two of these are worth knowing rather than assuming.
 

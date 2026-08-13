@@ -1,8 +1,10 @@
 package main
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -142,11 +144,65 @@ func TestInspectMeasuresASingleFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.bytes != 1234 {
-		t.Errorf("measured %d bytes, want 1234", result.bytes)
+	// What it OCCUPIES, which is its length rounded up to whole blocks - not the
+	// 1234 it reports for itself. The ceiling this feeds is the volume's free
+	// space, so the two have to be the same kind of number.
+	if result.bytes < 1234 {
+		t.Errorf("measured %d bytes, want at least the 1234 the file holds", result.bytes)
 	}
 	if result.hasIrregular {
 		t.Error("a plain file reported links")
+	}
+}
+
+// Twenty thousand one-byte files are 20KB by their own account and 82MB on the
+// disk they sit on. The ceiling exists to stop an extraction filling the volume,
+// and it is handed the volume's free space - so measuring what the files SAY
+// leaves it comparing two different kinds of number, and passing an extraction
+// that has already consumed thousands of times its measured size.
+func TestInspectMeasuresWhatTheVolumeLosesNotWhatTheFilesSay(t *testing.T) {
+	root := t.TempDir()
+
+	const files = 200
+	for i := 0; i < files; i++ {
+		write(t, filepath.Join(root, "f"+strconv.Itoa(i)), "x")
+	}
+
+	// A filesystem that keeps a small file inside its inode reports no blocks
+	// for it, and there is no difference here to measure. Proven rather than
+	// assumed, so this cannot pass by measuring nothing.
+	info, err := os.Lstat(filepath.Join(root, "f0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); !ok || stat.Blocks == 0 {
+		t.Skip("this filesystem stores a one-byte file without allocating a block")
+	}
+
+	result, err := inspect(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// st_blocks is counted in 512-byte units whatever the filesystem's own block
+	// size is, and a file holding a byte has to occupy at least one. So the floor
+	// is files*512 - two orders of magnitude above the `files` bytes they report
+	// between them, which is what makes this fail on the apparent figure rather
+	// than merely reading differently.
+	apparent := int64(0)
+	filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info, infoErr := entry.Info(); infoErr == nil {
+			apparent += info.Size()
+		}
+		return nil
+	})
+
+	if result.bytes < files*512 {
+		t.Errorf("measured %d bytes for %d one-byte files (apparent size of the tree is %d); "+
+			"that is what the files say rather than what they occupy",
+			result.bytes, files, apparent)
 	}
 }
 
