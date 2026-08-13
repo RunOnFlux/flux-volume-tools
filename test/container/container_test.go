@@ -156,6 +156,29 @@ func contents(t *testing.T, volume, name string) string {
 	return strings.TrimRight(string(data), "\n")
 }
 
+// What a sweep compares, derived independently of the code under test so the
+// format is pinned rather than echoed back.
+//
+// Read from inside a container, because an inode number belongs to the
+// filesystem that issued it and a bind mount does not always carry it across
+// unchanged: Docker Desktop synthesises its own on macOS, where a node's Linux
+// bind mount hands back the same number the host sees. flux-op recorded what it
+// saw from in there, so the comparison is made from the same side.
+func identityOf(t *testing.T, volume, name string) string {
+	t.Helper()
+	result := inContainer(t, volume, "", `stat -c '%i %.9Y' "$@"`, "/work/"+name)
+	if result.exit != 0 {
+		t.Fatalf("could not stat %s (exit %d):\n%s", name, result.exit, result.output)
+	}
+	fields := strings.Fields(strings.TrimSpace(result.output))
+	if len(fields) != 2 {
+		t.Fatalf("stat of %s returned %q", name, result.output)
+	}
+	// Seconds and nanoseconds arrive as one decimal number, padded to nine
+	// places, so removing the point is the whole conversion.
+	return fields[0] + " " + strings.Replace(fields[1], ".", "", 1)
+}
+
 func exists(volume, name string) bool {
 	_, err := os.Lstat(filepath.Join(volume, name))
 	return err == nil
