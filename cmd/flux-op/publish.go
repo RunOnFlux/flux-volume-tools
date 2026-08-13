@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 )
 
 // publish moves the result into place.
@@ -39,11 +38,7 @@ func publish(staging, destination, root, id string) error {
 	//
 	// This also means a staging path that is not there fails before the
 	// destination is displaced rather than after, which leaves nothing to sweep.
-	staged, err := os.Lstat(staging)
-	if err != nil {
-		return err
-	}
-	stagedIdentity, err := identity(staged)
+	stagedIdentity, err := identity(staging)
 	if err != nil {
 		return err
 	}
@@ -94,27 +89,3 @@ const (
 	swapPrefix   = ".flux-old-"
 	markerSuffix = ".dest"
 )
-
-// identity is what a sweep compares to decide whether a publish finished: the
-// inode number of the object being placed, and its modification time in
-// nanoseconds.
-//
-// Both survive rename, which is what makes them usable at all - ctime does not,
-// since rename updates it, and a recorded ctime would mismatch the moment the
-// publish succeeded.
-//
-// The inode number alone is not enough. Filesystems reuse them, so an entry the
-// app owner creates at the destination after a publish can carry the number
-// recorded here and be taken for the published object. An mtime to the
-// nanosecond does not collide by accident.
-//
-// It does not have to resist being forged. The app owner can read this file
-// through the file browser and can set an mtime, but a marker they match only
-// makes the sweep delete the data it was holding for them - their own.
-func identity(fi os.FileInfo) (string, error) {
-	stat, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return "", fmt.Errorf("cannot read the identity of %s on this platform", fi.Name())
-	}
-	return fmt.Sprintf("%d %d", stat.Ino, fi.ModTime().UnixNano()), nil
-}

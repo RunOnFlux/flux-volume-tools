@@ -1,10 +1,8 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 )
 
@@ -159,19 +157,17 @@ func TestPublishTreatsADanglingSymlinkAsAnExistingEntry(t *testing.T) {
 // aside and the replacement never arrived. Reproduced by publishing a staging
 // path that does not exist, so the second rename fails exactly where a crash
 // would land.
-// What a sweep compares, derived independently of the code under test so the
-// format is pinned rather than echoed back.
+// What a sweep compares. identity() is a unit in its own right, with its own
+// tests for the property that matters - that it does not move when the object
+// is written to - so what these tests pin is that the marker holds the identity
+// of the PUBLISHED object rather than of the displaced one.
 func identityOf(t *testing.T, path string) string {
 	t.Helper()
-	info, err := os.Lstat(path)
+	got, err := identity(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		t.Fatalf("no stat for %s", path)
-	}
-	return fmt.Sprintf("%d %d", stat.Ino, info.ModTime().UnixNano())
+	return got
 }
 
 func TestAnInterruptedPublishLeavesTheDataAndAMarkerThatPlacesIt(t *testing.T) {
