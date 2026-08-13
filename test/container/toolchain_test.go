@@ -31,11 +31,27 @@ func TestToolchainIsTheExpectedImplementation(t *testing.T) {
 			want:    "no-same-owner",
 			why:     "without it an archive's recorded uids land verbatim on the volume",
 		},
+		// The IMPLEMENTATION, not a flag. This case used to grep `cp --help` for
+		// -T, which busybox also lists and also implements - so it passed with
+		// coreutils dropped, which is the one thing it exists to catch. What the
+		// image actually depends on here is predictable GNU behaviour rather than
+		// a flag that is missing, so predictability is what has to be asserted.
 		{
-			name:    "cp supports -T",
-			command: "cp --help 2>&1",
-			want:    "-T",
-			why:     "cp -T is what stops a copy landing INSIDE the staging directory",
+			name:    "cp is GNU coreutils",
+			command: "cp --version 2>&1",
+			want:    "GNU coreutils",
+			why:     "busybox's applet accepts the same flags and does not behave identically",
+		},
+		// Guaranteed by the same package, and asserted for the same reason. The
+		// executor does not invoke it - a move is a publish whose source is
+		// already the result, so flux-op renames rather than shelling out - but
+		// the image promises it, and a promise nothing checks is how the one
+		// above came to be vacuous.
+		{
+			name:    "mv is GNU coreutils",
+			command: "mv --version 2>&1",
+			want:    "GNU coreutils",
+			why:     "the Contract names it, so something has to hold the image to it",
 		},
 		{
 			name:    "zip is present",
@@ -63,6 +79,10 @@ func TestToolchainIsTheExpectedImplementation(t *testing.T) {
 
 // -T has to actually refuse to recurse into an existing destination, not merely
 // be accepted as a flag.
+//
+// This proves the BEHAVIOUR the copy operation depends on, and it is worth
+// having for that - but it is not a coreutils detector: busybox implements -T
+// and passes this too. What tells the two apart is the version assertion above.
 func TestCopyDoesNotNestIntoAnExistingDestination(t *testing.T) {
 	volume := volumeDir(t)
 	seed(t, volume, `mkdir -p /work/src /work/dst && echo hi > /work/src/f`)

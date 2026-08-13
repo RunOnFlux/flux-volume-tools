@@ -193,6 +193,13 @@ The image guarantees these binaries, with GNU / Info-ZIP semantics:
 | `zip` | `zip` | busybox has no zip applet at all |
 | `gzip` | busybox | applet is sufficient |
 
+`mv` is guaranteed but never driven: a move is a publish whose source is already
+the result, so `flux-op` renames rather than running anything. It is in the
+contract because the image promises it, and the test holds the image to it —
+`cp`'s guarantee was checked by grepping `--help` for `-T`, which busybox also
+lists and also implements, so the one case that existed to catch coreutils being
+dropped passed without it.
+
 There is no entrypoint. The executor always supplies argv.
 
 ## Consuming it
