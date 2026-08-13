@@ -87,6 +87,15 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # One at a time. Both architectures push to the SAME package, and GHCR
+      # answers two simultaneous pushes to one package with a secondary rate
+      # limit - a 403 that reads like a permissions failure and is not one. It
+      # cost the first run its arm64 leg while amd64 went through, which is the
+      # shape of a throughput limit rather than of a broken credential.
+      #
+      # The minute this adds is worth it on a path that publishes: a release
+      # that fails intermittently is worse than one that takes longer.
+      max-parallel: 1
       matrix:
         include:
           - platform: linux/amd64
