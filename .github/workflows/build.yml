@@ -16,9 +16,24 @@ permissions:
   contents: read
   packages: write
 
+# One run per ref. Two pushes to main in quick succession would otherwise race
+# each other to the same tag, and the winner is whichever finishes last rather
+# than whichever is newer.
+#
+# Cancelled only for pull requests. A run that is publishing has already pushed
+# per-architecture images, and killing it between that and the manifest list
+# leaves them in the registry with nothing pointing at them.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   IMAGE: ghcr.io/runonflux/flux-volume-tools
 
+# Actions are pinned to commits rather than to major tags. A major tag is
+# mutable, and every job here runs with packages: write - so a compromised tag
+# would be a compromised release of the program that runs as root over an
+# application's volume. The comment after each is the tag it was resolved from.
 jobs:
   # flux-op's own logic, reachable without a container in the way. The shell
   # implementation this replaced could only be exercised through one, which is
@@ -26,15 +41,15 @@ jobs:
   unit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
 
       - name: Assert the source is formatted
         run: |
-          unformatted="$(gofmt -l cmd)"
+          unformatted="$(gofmt -l cmd test)"
           if [ -n "$unformatted" ]; then
             echo "not gofmt'd: $unformatted"
             exit 1
@@ -42,7 +57,12 @@ jobs:
 
       - run: go vet ./...
 
-      - run: go test ./... -race
+      # The container tests are behind a build tag, so the vet above never
+      # compiles them. They are the half most likely to rot precisely because
+      # nothing compiles them by default.
+      - run: go vet -tags docker ./...
+
+      - run: go test ./cmd/... -race
 
   # What the image DOES, exercised through a container configured exactly as the
   # FluxOS volume executor configures it - read-only rootfs, no network, all
@@ -52,28 +72,69 @@ jobs:
   #
   # Both architectures. arm64 is published and, before this, was never executed
   # here at all.
+  #
+  # Where this run publishes, the image is pushed BEFORE it is tested and is
+  # tested through the registry. That ordering is the point: what gets tagged is
+  # then the same bytes that passed, rather than a second build of the same
+  # source. The Dockerfile pins a minor Alpine tag and installs unpinned apk
+  # packages, so two builds minutes apart are not required to agree - and the one
+  # that shipped used to be the one nothing had run.
+  #
+  # A digest with no tag on it is not published in any useful sense: nothing can
+  # resolve to it without already knowing it. If the tests fail, no tag is ever
+  # created and the digest is left unreferenced.
   image:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        platform: [linux/amd64, linux/arm64]
+        include:
+          - platform: linux/amd64
+            arch: amd64
+          - platform: linux/arm64
+            arch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
 
       # Only the non-native architecture needs emulation, and only to RUN the
       # image: flux-op is cross-compiled in the build stage either way.
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
         if: matrix.platform != 'linux/amd64'
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build this architecture and push it by digest
+        id: pushed
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Take the image under test back out of the registry
+        if: github.event_name != 'pull_request'
+        run: |
+          reference="${IMAGE}@${{ steps.pushed.outputs.digest }}"
+          docker pull --platform '${{ matrix.platform }}' "$reference"
+          echo "IMAGE_UNDER_TEST=$reference" >> "$GITHUB_ENV"
+
+      # A pull request publishes nothing, so there is nothing to push by digest
+      # and no token to do it with on a fork. Built and kept locally instead.
       - name: Build the image
-        uses: docker/build-push-action@v6
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -81,56 +142,95 @@ jobs:
           load: true
           tags: flux-volume-tools:test
 
+      - name: Name the image under test
+        if: github.event_name == 'pull_request'
+        run: echo "IMAGE_UNDER_TEST=flux-volume-tools:test" >> "$GITHUB_ENV"
+
       # -count=1 because the image is an input the test cache cannot see: with a
       # warm cache the arm64 run would report the amd64 result and pass without
       # ever starting a container.
       - name: Assert what the image does
+        env:
+          FLUX_VOLUME_TOOLS_IMAGE: ${{ env.IMAGE_UNDER_TEST }}
         run: go test -tags docker -count=1 ./test/container/ -v
 
+      - name: Keep the digest that passed
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p /tmp/digests
+          digest='${{ steps.pushed.outputs.digest }}'
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name != 'pull_request'
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assembles the manifest list from the digests that passed. This job builds
+  # nothing: it only names images that already exist and have already been
+  # tested, which is what makes the published image the tested one.
   publish:
     needs: [unit, image]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.IMAGE }}
           tags: |
             type=ref,event=tag
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-      # This digest is the value FluxOS pins. It is the manifest LIST digest, so it
-      # resolves to the right architecture on both x86 and arm nodes.
-      - name: Publish digest to run summary
+      - name: Assemble the manifest list from the digests that passed
+        working-directory: /tmp/digests
         run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
+
+      # Everything FluxOS has to write down, in one place. The pin is a tag AND
+      # a per-architecture image id, and the id is the digest of the image's own
+      # CONFIG rather than of its manifest - so the manifest list digest alone,
+      # which is what this job used to print, is not enough to fill it in.
+      - name: Write the pin to the run summary
+        run: |
+          reference="${IMAGE}:${{ steps.meta.outputs.version }}"
           {
             echo '## Published'
             echo
-            echo 'Pin this in FluxOS:'
+            echo 'ZelBack/config/volumeToolsImage.json:'
             echo
-            echo '```'
-            echo "${{ env.IMAGE }}@${{ steps.build.outputs.digest }}"
+            echo '```json'
+            echo '{'
+            echo "  \"image\": \"${reference}\","
+            echo '  "imageIds": {'
+            for arch in amd64 arm64; do
+              manifest="$(docker buildx imagetools inspect "$reference" --raw |
+                jq -r --arg a "$arch" '.manifests[] | select(.platform.architecture == $a and .platform.os == "linux") | .digest')"
+              config="$(docker buildx imagetools inspect "${IMAGE}@${manifest}" --raw | jq -r '.config.digest')"
+              comma=','
+              [ "$arch" = arm64 ] && comma=''
+              echo "    \"${arch}\": \"${config}\"${comma}"
+            done
+            echo '  }'
+            echo '}'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

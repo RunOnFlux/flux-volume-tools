@@ -255,5 +255,24 @@ It requires no secrets — GHCR publishing uses the automatic `GITHUB_TOKEN` wit
 
 Every build runs a smoke test first that asserts each binary above is the expected
 implementation, so a change in Alpine's packaging fails the build rather than
-shipping a busybox applet into production. The published manifest digest is written
-to the workflow run summary; that is the value to pin in FluxOS.
+shipping a busybox applet into production.
+
+**The image that is published is the image that was tested.** Each architecture is
+built once, pushed by digest with no tag on it, and then pulled back out of the
+registry and tested through it. Only once both have passed does a final job
+assemble the manifest list from those digests — so a tag never names bytes that
+nothing ran. It used to build a second time to publish, and since the Dockerfile
+pins a minor Alpine tag and installs unpinned packages, two builds minutes apart
+were not required to agree.
+
+A digest carrying no tag is not published in any useful sense — nothing can
+resolve to it without already knowing it — so a failed run leaves an unreferenced
+digest and no tag.
+
+The run summary prints the whole pin, ready to paste: the tag and both
+per-architecture image ids. The ids are the digests of each image's own *config*,
+which is what FluxOS verifies against, and they cannot be derived from the
+manifest list digest alone.
+
+Actions are pinned to commit SHAs rather than to major tags. A major tag is
+mutable and every job holds `packages: write`.
