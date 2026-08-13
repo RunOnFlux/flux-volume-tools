@@ -81,7 +81,12 @@ func publish(staging, destination, root, id string) error {
 	// crash between the two renames below leaves the caller's previous data
 	// under `old` with its own path empty, and without this the sweep has no way
 	// to know where to put it back - it would delete the only copy.
-	record := markerContents(destination, root) + "\n" + stagedIdentity + "\n"
+	belongs, err := markerContents(destination, root)
+	if err != nil {
+		return err
+	}
+
+	record := belongs + "\n" + stagedIdentity + "\n"
 	if err := writeMarker(marker, record); err != nil {
 		return fmt.Errorf("could not record where %s belongs: %w", destination, err)
 	}

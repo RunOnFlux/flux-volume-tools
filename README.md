@@ -159,6 +159,33 @@ The image is published for `linux/amd64` and `linux/arm64`. Pinning the manifest
 list digest resolves to the right architecture on each node; pinning a per-architecture
 digest instead would work on x86 and fail on every arm node.
 
+## Testing
+
+```
+./scripts/test.sh
+```
+
+Runs everything CI checks: formatting, `go vet` — twice, because the container
+tests sit behind a build tag the plain run never compiles — the unit tests with
+`-race`, both published architectures plus the host build, then it builds the
+image and runs the container suite against it.
+
+The two halves answer different questions and neither substitutes for the other:
+
+| | what it covers |
+|---|---|
+| `go test ./cmd/...` | what `flux-op` **decides** — the publish ordering, the ceiling, the marker, what is refused |
+| `go test -tags docker ./test/container/` | what the **image** does, in a container configured exactly as the executor configures it |
+
+Run the second half through the script rather than by hand. It needs a build tag
+*and* a freshly built image, so `go test ./...` runs none of it and still reports
+success — which is how a stale helper in that suite once sat failing for a whole
+session while the suite was believed green.
+
+`-count=1` is not optional for the container half: the image is an input the test
+cache cannot see, so rebuilding it and running again reports the previous result
+without ever starting a container. The script passes it.
+
 ## Releasing
 
 `.github/workflows/build.yml` builds both architectures and pushes to GHCR on:

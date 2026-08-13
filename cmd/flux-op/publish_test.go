@@ -278,9 +278,32 @@ func TestMarkerContentsAreRelativeToTheVolumeRoot(t *testing.T) {
 		{"/work/", "/work/photos", "photos"},
 	}
 	for _, testCase := range cases {
-		if got := markerContents(testCase.destination, testCase.root); got != testCase.want {
+		got, err := markerContents(testCase.destination, testCase.root)
+		if err != nil {
+			t.Errorf("markerContents(%q, %q): %v", testCase.destination, testCase.root, err)
+			continue
+		}
+		if got != testCase.want {
 			t.Errorf("markerContents(%q, %q) = %q, want %q",
 				testCase.destination, testCase.root, got, testCase.want)
+		}
+	}
+}
+
+// The shape that cannot be abused is the one that cannot be written down, and
+// that only holds if a destination outside the root is REFUSED. Trimming a
+// prefix that is not there leaves the absolute path, which is what a reader
+// would then be handed - and which the whole relative form exists to prevent.
+func TestMarkerContentsRefuseADestinationOutsideTheRoot(t *testing.T) {
+	cases := []struct{ root, destination string }{
+		{"/work", "/etc/cron.d/payload"},
+		{"/work", "/workshop/photos"},
+		{"/work", "photos"},
+	}
+	for _, testCase := range cases {
+		if got, err := markerContents(testCase.destination, testCase.root); err == nil {
+			t.Errorf("markerContents(%q, %q) = %q, want a refusal",
+				testCase.destination, testCase.root, got)
 		}
 	}
 }

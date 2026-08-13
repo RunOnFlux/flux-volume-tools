@@ -172,3 +172,32 @@ func TestInspectRefusesAResultThatIsItselfALink(t *testing.T) {
 		t.Fatal("inspecting a result that is a link succeeded")
 	}
 }
+
+// An entry that cannot be read is skipped rather than fatal, which is what du
+// does. Whether its contents would have breached the ceiling is unknowable
+// either way, and failing the measurement would refuse an operation over a
+// directory the application merely happened to make unreadable.
+func TestInspectSkipsWhatItCannotRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root, where an unreadable directory is not unreadable")
+	}
+
+	root := t.TempDir()
+	write(t, filepath.Join(root, "readable"), strings.Repeat("x", 100))
+	closed := filepath.Join(root, "closed")
+	write(t, filepath.Join(closed, "hidden"), strings.Repeat("x", 5000))
+	if err := os.Chmod(closed, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(closed, 0o755) })
+
+	result, err := inspect(root)
+	if err != nil {
+		t.Fatalf("a directory that could not be read failed the whole measurement: %v", err)
+	}
+	// The readable file is still counted, so the walk carried on rather than
+	// stopping at the entry it could not open.
+	if result.bytes < 100 {
+		t.Errorf("measured %d bytes, want at least the 100 it could read", result.bytes)
+	}
+}

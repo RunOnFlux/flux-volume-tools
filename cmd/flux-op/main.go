@@ -31,9 +31,17 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 )
+
+// The shape the startup sweep matches when it decides which entries at the
+// volume root are this program's artefacts. Checked here as well as there
+// because the two must not drift: a name accepted here and refused there is a
+// copy of the caller's data left on their volume permanently, at a name the
+// browser hides from them.
+var operationIdentifier = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // Exit codes the caller distinguishes. Everything else is the command's own
 // status, passed through unchanged.
@@ -114,6 +122,21 @@ func parse(argv []string) (*options, error) {
 	if len(rest) < 3 || opts.id == "" || opts.root == "" {
 		return nil, errUsage
 	}
+
+	// Both are joined into paths below, so their shape is not a formality. An
+	// identifier carrying a separator puts the artefacts in a subdirectory the
+	// sweep never reads, and one carrying traversal puts them outside the volume
+	// altogether - in both cases leaving a copy of the caller's data that nothing
+	// will ever reclaim.
+	if !operationIdentifier.MatchString(opts.id) {
+		return nil, fmt.Errorf("flux-op: --id must be an operation identifier, not %q", opts.id)
+	}
+
+	root, ok := volumeRoot(opts.root)
+	if !ok {
+		return nil, fmt.Errorf("flux-op: --root must be an absolute path that leads where it says, not %q", opts.root)
+	}
+	opts.root = root
 
 	opts.staging, opts.destination = rest[0], rest[1]
 	if rest[2] != "--" {
@@ -289,6 +312,34 @@ func run(argv []string) int {
 // one that cannot be written down. Traversal still has to be refused by whoever
 // reads it - ".." is expressible in a relative path too - but the class does not
 // need checking for if it cannot be represented.
-func markerContents(destination, root string) string {
-	return strings.TrimPrefix(destination, strings.TrimSuffix(root, string(filepath.Separator))+string(filepath.Separator))
+func markerContents(destination, root string) (string, error) {
+	base := strings.TrimSuffix(filepath.Clean(root), string(filepath.Separator))
+	cleaned := filepath.Clean(destination)
+
+	relative := strings.TrimPrefix(cleaned, base+string(filepath.Separator))
+	// Unchanged means the prefix was not there. Trimming a prefix that is absent
+	// is a no-op, so without this the absolute path is what gets written down -
+	// which is the one shape this function exists to make unrepresentable.
+	if relative == cleaned || relative == "" {
+		return "", fmt.Errorf("%s is not inside %s, so where it belongs cannot be recorded", destination, root)
+	}
+	return relative, nil
+}
+
+// volumeRoot normalises the volume root, and reports whether it is one.
+//
+// Absolute, because everything here is built by joining onto it and a relative
+// root resolves against whatever directory this happened to be started in.
+// Rejected rather than cleaned when cleaning would CHANGE where it points: a
+// root of /work/../etc is a path that does not lead where it says, and silently
+// accepting it as /etc would put this program to work somewhere nobody named.
+func volumeRoot(root string) (string, bool) {
+	cleaned := filepath.Clean(root)
+	if !filepath.IsAbs(cleaned) {
+		return "", false
+	}
+	if cleaned != root && cleaned != strings.TrimRight(root, string(filepath.Separator)) {
+		return "", false
+	}
+	return cleaned, true
 }
