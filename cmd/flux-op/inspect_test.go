@@ -66,7 +66,13 @@ func TestInspectFindsASymlinkAndDoesNotFollowIt(t *testing.T) {
 	if !result.hasIrregular {
 		t.Error("the symlink was not reported")
 	}
-	if result.bytes > 10000 {
+	// Bounded well below the 100,000 bytes behind the link and well above the
+	// handful of blocks a three-entry tree occupies. The old bound of 10,000 was
+	// calibrated against apparent sizes and had no room in it once entries were
+	// measured by what they occupy: on ext4 this tree is 12,288 bytes of blocks
+	// and on APFS it is a fraction of that, so the same figure passed locally
+	// and failed in CI.
+	if result.bytes > 50000 {
 		t.Errorf("measured %d bytes - the walk followed the link and measured what is behind it", result.bytes)
 	}
 }

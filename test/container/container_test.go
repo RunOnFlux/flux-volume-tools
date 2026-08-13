@@ -130,7 +130,17 @@ func fluxOp(t *testing.T, volume, stdin string, args ...string) outcome {
 	if index < 0 {
 		t.Fatalf("flux-op never reported an exit code:\n%s", result.output)
 	}
-	code, err := strconv.Atoi(strings.TrimSpace(result.output[index+len(marker):]))
+	// The first line after the marker, not everything after it. stdout and
+	// stderr arrive on one stream here, and which lands last is a matter of
+	// buffering rather than of order - so a run that writes to stderr can put a
+	// diagnostic AFTER the marker, and reading to the end then parses the
+	// diagnostic as part of the number. That failed on one architecture and
+	// passed on the other in the same run.
+	tail := result.output[index+len(marker):]
+	if newline := strings.IndexByte(tail, '\n'); newline >= 0 {
+		tail = tail[:newline]
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(tail))
 	if err != nil {
 		t.Fatalf("could not read the exit code:\n%s", result.output)
 	}
