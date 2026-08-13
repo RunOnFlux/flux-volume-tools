@@ -137,6 +137,47 @@ drift apart, and no second container spawn is needed per operation. Operands
 arrive as positional parameters and are never interpolated into a command
 string.
 
+## What a hostile archive cannot do
+
+Extraction is the one operation that runs attacker-supplied *structure* rather
+than attacker-supplied bytes, so it is worth recording what stops each classic
+archive trick — and which layer actually stops it, because several are not this
+program's doing.
+
+| Attempt | Outcome | What stops it |
+|---|---|---|
+| member named `../../../../etc/evil` | refused, nothing extracted | GNU tar — *"Member name contains '..'"* |
+| member named `/etc/hostname` | extracted as `etc/hostname` **inside** the target | GNU tar strips the leading `/` |
+| symlink, then a member written *through* it | the link is replaced by a real directory; nothing reaches the target | GNU tar |
+| a symlink left in the result | refused | `--ordinary-only` |
+| a hard link to data outside the result | refused | `--ordinary-only` |
+| a FIFO or socket | refused | `--ordinary-only` |
+| a device node | cannot be created at all | `CAP_MKNOD` is dropped; FluxOS also mounts the volume `nodev` |
+| a setuid binary | the bit survives extraction, and is **inert** | FluxOS mounts the app volume `nosuid` |
+| anything reaching off the volume | nowhere to land | no network, read-only rootfs, the volume is the only mount |
+
+Size is deliberately absent from that table. `--max-bytes` bounds what an
+extraction may leave, and it is applied to what actually landed rather than to
+what the archive declares about itself — but stating a bound is not the same as
+proving one, and it is not listed here until it has been.
+
+Two of these are worth knowing rather than assuming.
+
+**The symlink defences are tar's, not ours.** `--ordinary-only` refuses a link
+*after* the command has run, so it catches a link left in the result — but a
+write *through* one would already have happened by then. What prevents it is GNU
+tar replacing the link with a directory. That is a reason the GNU pinning in the
+Contract below matters more than it appears: busybox tar is not the same program.
+
+**The setuid bit is preserved, and that is fine.** tar restores it and this
+program does not strip it, because the mount is where it is neutralised — one
+place, covering every route such a file can arrive by, including a plain copy.
+
+Verified by running each case in a container configured exactly as the executor
+configures one, on a filesystem that can hold the bits being tested. A bind mount
+from a macOS host silently drops setuid, which makes that row look safe when it
+is not being tested at all.
+
 ## Contract
 
 The image guarantees these binaries, with GNU / Info-ZIP semantics:
