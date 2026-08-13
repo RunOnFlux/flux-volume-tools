@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // publish moves the result into place.
@@ -30,6 +31,23 @@ import (
 // without something else already being wrong - and a non-atomic publish is
 // exactly what the caller was promised would not occur.
 func publish(staging, destination, root, id string) error {
+	// Which object is about to be published, read before anything moves. A
+	// sweep that finds a destination occupied cannot otherwise tell what is
+	// sitting there: the object this publish placed, or one the app owner put
+	// at that path themselves while the destination stood empty. Recording the
+	// answer costs one lstat and replaces a guess with a comparison.
+	//
+	// This also means a staging path that is not there fails before the
+	// destination is displaced rather than after, which leaves nothing to sweep.
+	staged, err := os.Lstat(staging)
+	if err != nil {
+		return err
+	}
+	stagedIdentity, err := identity(staged)
+	if err != nil {
+		return err
+	}
+
 	// Lstat, not Stat: a dangling symlink at the destination is an entry that
 	// has to be moved aside, and a check that followed it would treat the
 	// destination as empty and rename over the link.
@@ -47,7 +65,8 @@ func publish(staging, destination, root, id string) error {
 	// crash between the two renames below leaves the caller's previous data
 	// under `old` with its own path empty, and without this the sweep has no way
 	// to know where to put it back - it would delete the only copy.
-	if err := os.WriteFile(marker, []byte(markerContents(destination, root)+"\n"), 0o644); err != nil {
+	record := markerContents(destination, root) + "\n" + stagedIdentity + "\n"
+	if err := os.WriteFile(marker, []byte(record), 0o644); err != nil {
 		return fmt.Errorf("could not record where %s belongs: %w", destination, err)
 	}
 
@@ -75,3 +94,27 @@ const (
 	swapPrefix   = ".flux-old-"
 	markerSuffix = ".dest"
 )
+
+// identity is what a sweep compares to decide whether a publish finished: the
+// inode number of the object being placed, and its modification time in
+// nanoseconds.
+//
+// Both survive rename, which is what makes them usable at all - ctime does not,
+// since rename updates it, and a recorded ctime would mismatch the moment the
+// publish succeeded.
+//
+// The inode number alone is not enough. Filesystems reuse them, so an entry the
+// app owner creates at the destination after a publish can carry the number
+// recorded here and be taken for the published object. An mtime to the
+// nanosecond does not collide by accident.
+//
+// It does not have to resist being forged. The app owner can read this file
+// through the file browser and can set an mtime, but a marker they match only
+// makes the sweep delete the data it was holding for them - their own.
+func identity(fi os.FileInfo) (string, error) {
+	stat, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", fmt.Errorf("cannot read the identity of %s on this platform", fi.Name())
+	}
+	return fmt.Sprintf("%d %d", stat.Ino, fi.ModTime().UnixNano()), nil
+}

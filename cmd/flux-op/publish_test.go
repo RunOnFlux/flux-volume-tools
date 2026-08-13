@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -157,27 +159,98 @@ func TestPublishTreatsADanglingSymlinkAsAnExistingEntry(t *testing.T) {
 // aside and the replacement never arrived. Reproduced by publishing a staging
 // path that does not exist, so the second rename fails exactly where a crash
 // would land.
+// What a sweep compares, derived independently of the code under test so the
+// format is pinned rather than echoed back.
+func identityOf(t *testing.T, path string) string {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("no stat for %s", path)
+	}
+	return fmt.Sprintf("%d %d", stat.Ino, info.ModTime().UnixNano())
+}
+
 func TestAnInterruptedPublishLeavesTheDataAndAMarkerThatPlacesIt(t *testing.T) {
 	root := t.TempDir()
-	staging := filepath.Join(root, ".flux-op-"+testID)
-	destination := filepath.Join(root, "nested", "deeper", "dest")
-	write(t, destination, "precious")
+
+	// A directory published over its own parent, which is a move a user can
+	// ask for. The first rename carries the staging path away inside the
+	// destination, so the second finds nothing at it and the publish stops
+	// between the two - the state a crash in that window leaves, reached
+	// without one.
+	destination := filepath.Join(root, "photos")
+	staging := filepath.Join(destination, "2024")
+	write(t, staging, "precious")
 
 	if err := publish(staging, destination, root, testID); err == nil {
-		t.Fatal("publishing a staging path that does not exist succeeded")
+		t.Fatal("publishing a directory over its own parent succeeded")
 	}
 
 	displaced := filepath.Join(root, swapPrefix+testID)
-	if got := read(t, displaced); got != "precious" {
+	if got := read(t, filepath.Join(displaced, "2024")); got != "precious" {
 		t.Errorf("displaced data holds %q, want precious", got)
+	}
+	if _, err := os.Lstat(destination); !os.IsNotExist(err) {
+		t.Error("the destination is still there, so this is not the interrupted state")
 	}
 
 	// Relative, so nothing that reads it can be sent off the volume by
 	// following an absolute path. At the volume root, which is the one
 	// directory the sweep reads - not beside the destination, wherever the
 	// caller happened to keep it.
-	if got := read(t, displaced+markerSuffix); got != "nested/deeper/dest\n" {
-		t.Errorf("marker holds %q, want nested/deeper/dest", got)
+	//
+	// The identity is read from the displaced copy: rename preserved it, which
+	// is the property the whole record depends on.
+	want := "photos\n" + identityOf(t, filepath.Join(displaced, "2024")) + "\n"
+	if got := read(t, displaced+markerSuffix); got != want {
+		t.Errorf("marker holds %q, want %q", got, want)
+	}
+}
+
+// The record has to name the object being placed, not the one being displaced -
+// the sweep compares it against whatever occupies the destination afterwards.
+func TestTheMarkerRecordsTheIdentityOfWhatIsBeingPublished(t *testing.T) {
+	root := t.TempDir()
+	destination := filepath.Join(root, "photos")
+	staging := filepath.Join(destination, "2024")
+	write(t, staging, "precious")
+	displacedIdentity := identityOf(t, destination)
+
+	if err := publish(staging, destination, root, testID); err == nil {
+		t.Fatal("publishing a directory over its own parent succeeded")
+	}
+
+	marker := read(t, filepath.Join(root, swapPrefix+testID)+markerSuffix)
+	if got := identityOf(t, filepath.Join(root, swapPrefix+testID, "2024")); marker != "photos\n"+got+"\n" {
+		t.Errorf("marker holds %q, want the identity of the published object %q", marker, got)
+	}
+	if marker == "photos\n"+displacedIdentity+"\n" {
+		t.Error("marker records the displaced entry rather than what is being published")
+	}
+}
+
+// Nothing is displaced over an operation that cannot be carried out, so there is
+// nothing for a sweep to put back afterwards.
+func TestAMissingStagingPathFailsBeforeAnythingMoves(t *testing.T) {
+	root := t.TempDir()
+	staging := filepath.Join(root, ".flux-op-"+testID)
+	destination := filepath.Join(root, "dest")
+	write(t, destination, "precious")
+
+	if err := publish(staging, destination, root, testID); err == nil {
+		t.Fatal("publishing a staging path that does not exist succeeded")
+	}
+
+	if got := read(t, destination); got != "precious" {
+		t.Errorf("destination holds %q, want precious", got)
+	}
+	entries, _ := os.ReadDir(root)
+	if len(entries) != 1 {
+		t.Errorf("volume holds %d entries, want only the untouched destination: %v", len(entries), entries)
 	}
 }
 

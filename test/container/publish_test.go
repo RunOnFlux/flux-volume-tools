@@ -191,30 +191,63 @@ func TestAFailureNeverDiscardsAnOperandTheCallerOwns(t *testing.T) {
 // would land.
 func TestAnInterruptedPublishLeavesTheDataAndAMarkerThatPlacesIt(t *testing.T) {
 	volume := volumeDir(t)
-	seed(t, volume, `mkdir -p /work/a/b /work/x/y && echo precious > /work/x/y/out`)
+	seed(t, volume, `mkdir -p /work/x/y/out && echo precious > /work/x/y/out/2024`)
+
+	// A directory published over its own parent, which is a move a user can ask
+	// for. The first rename carries the staging path away inside the
+	// destination, so the second finds nothing at it and the publish stops
+	// between the two - the state a crash in that window leaves, without having
+	// to kill the process to reach it.
+	result := fluxOp(t, volume, "", baseArgs("/work/x/y/out/2024", "/work/x/y/out", "--")...)
+
+	if result.exit == 0 {
+		t.Fatalf("publishing a directory over its own parent succeeded:\n%s", result.output)
+	}
+
+	displaced := ".flux-old-" + operationID
+	if got := contents(t, volume, displaced+"/2024"); got != "precious" {
+		t.Errorf("displaced data holds %q, want precious\n%s", got, tree(volume))
+	}
+	if exists(volume, "x/y/out") {
+		t.Error("the destination is still there, so this is not the interrupted state")
+	}
+
+	// Relative, so nothing that reads it can be sent off the volume by following
+	// an absolute path. At the volume root, which is the one directory the sweep
+	// reads - not beside the destination, wherever the caller kept it.
+	marker := contents(t, volume, displaced+".dest")
+	lines := strings.Split(marker, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("marker holds %q, want a destination and an identity", marker)
+	}
+	if lines[0] != "x/y/out" {
+		t.Errorf("marker names %q, want x/y/out", lines[0])
+	}
+
+	// The identity is read from the displaced copy: rename preserved it, which
+	// is the property that lets a sweep tell the published object from one the
+	// app owner put at the same path.
+	if want := identityOf(t, volume, displaced+"/2024"); lines[1] != want {
+		t.Errorf("marker identity is %q, want %q\n%s", lines[1], want, tree(volume))
+	}
+}
+
+// Nothing is displaced over an operation that cannot be carried out, so there is
+// nothing for a sweep to put back afterwards.
+func TestAMissingStagingPathFailsBeforeAnythingMoves(t *testing.T) {
+	volume := volumeDir(t)
+	seed(t, volume, `mkdir -p /work/x/y && echo precious > /work/x/y/out`)
 
 	result := fluxOp(t, volume, "", baseArgs("/work/a/b/photos", "/work/x/y/out", "--")...)
 
 	if result.exit == 0 {
 		t.Fatalf("publishing a staging path that does not exist succeeded:\n%s", result.output)
 	}
-
-	displaced := ".flux-old-" + operationID
-	if got := contents(t, volume, displaced); got != "precious" {
-		t.Errorf("displaced data holds %q, want precious\n%s", got, tree(volume))
+	if got := contents(t, volume, "x/y/out"); got != "precious" {
+		t.Errorf("destination holds %q, want precious\n%s", got, tree(volume))
 	}
-
-	// Relative, so nothing that reads it can be sent off the volume by following
-	// an absolute path. At the volume root, which is the one directory the sweep
-	// reads - not beside the destination, wherever the caller kept it.
-	if got := contents(t, volume, displaced+".dest"); got != "x/y/out" {
-		t.Errorf("marker holds %q, want x/y/out", got)
-	}
-	if exists(volume, "x/y/"+displaced) {
-		t.Error("the artefacts were left beside the destination rather than at the volume root")
-	}
-	if exists(volume, "x/y/out") {
-		t.Error("the destination is still there, so this is not the interrupted state")
+	if exists(volume, ".flux-old-"+operationID) || exists(volume, ".flux-old-"+operationID+".dest") {
+		t.Errorf("an operation that never started left artefacts behind\n%s", tree(volume))
 	}
 }
 
