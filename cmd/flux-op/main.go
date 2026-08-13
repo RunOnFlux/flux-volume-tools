@@ -1,7 +1,7 @@
 // Command flux-op runs one file operation and publishes its result atomically.
 //
 //	flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] [--max-bytes N]
-//	        [--no-links] [--from-stdin] <staging> <destination> -- [command [args...]]
+//	        [--ordinary-only] [--from-stdin] <staging> <destination> -- [command [args...]]
 //
 // --id and --root together decide where the artefacts of an interrupted publish
 // land and what they are called: <root>/.flux-old-<id> and its .dest marker.
@@ -29,16 +29,26 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"syscall"
 )
+
+// The shape the startup sweep matches when it decides which entries at the
+// volume root are this program's artefacts. Checked here as well as there
+// because the two must not drift: a name accepted here and refused there is a
+// copy of the caller's data left on their volume permanently, at a name the
+// browser hides from them.
+var operationIdentifier = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // Exit codes the caller distinguishes. Everything else is the command's own
 // status, passed through unchanged.
 const (
-	exitUsage    = 2
-	exitTooLarge = 3
-	exitHasLinks = 4
+	exitUsage       = 2
+	exitTooLarge    = 3
+	exitNotOrdinary = 4
 	// 128 + SIGTERM, which is what a shell reports for a signalled process and
 	// what FluxOS matches on to tell a cancelled operation from a failed one.
 	exitCanceled = 143
@@ -50,7 +60,7 @@ type options struct {
 	discardStaging bool
 	makeStaging    bool
 	maxBytes       int64
-	noLinks        bool
+	ordinaryOnly   bool
 	fromStdin      bool
 
 	staging     string
@@ -59,7 +69,7 @@ type options struct {
 }
 
 const usage = "flux-op: usage: flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] " +
-	"[--max-bytes N] [--no-links] [--from-stdin] <staging> <destination> -- [command [args...]]"
+	"[--max-bytes N] [--ordinary-only] [--from-stdin] <staging> <destination> -- [command [args...]]"
 
 func main() {
 	// os.Exit skips deferred functions, so everything that has to run on the way
@@ -93,11 +103,16 @@ func parse(argv []string) (*options, error) {
 	// an archive's declared size is written by whoever built it. For --from-stdin
 	// it is enforced as the bytes arrive, because this program is the writer.
 	flags.Int64Var(&opts.maxBytes, "max-bytes", 0, "refuse a result larger than this")
-	// Refuse a result containing links. An archive that carries a symlink and
-	// then writes through it reaches wherever the link points; inside this
-	// container that is nowhere useful, but the result is published onto a
-	// volume that other code paths - and other nodes, through sync - do read.
-	flags.BoolVar(&opts.noLinks, "no-links", false, "refuse a result containing links")
+	// Refuse a result holding anything that is not ordinary data. Two kinds, for
+	// different reasons: a link reaches outside itself - an archive that carries
+	// one and then writes through it reaches wherever it points - and a FIFO or
+	// socket is not data at all, so whatever reads it without O_NONBLOCK waits
+	// for a writer that never comes.
+	//
+	// Inside this container neither is much use, but the result is published
+	// onto a volume that other code paths - and other nodes, through sync - do
+	// read.
+	flags.BoolVar(&opts.ordinaryOnly, "ordinary-only", false, "refuse a result holding anything that is not ordinary data")
 	// The caller streams the content in rather than naming a command to produce
 	// it. There is no child process at all, so nothing can exit successfully on
 	// a short read: the transfer ends when the caller closes the stream, and the
@@ -112,6 +127,21 @@ func parse(argv []string) (*options, error) {
 	if len(rest) < 3 || opts.id == "" || opts.root == "" {
 		return nil, errUsage
 	}
+
+	// Both are joined into paths below, so their shape is not a formality. An
+	// identifier carrying a separator puts the artefacts in a subdirectory the
+	// sweep never reads, and one carrying traversal puts them outside the volume
+	// altogether - in both cases leaving a copy of the caller's data that nothing
+	// will ever reclaim.
+	if !operationIdentifier.MatchString(opts.id) {
+		return nil, fmt.Errorf("flux-op: --id must be an operation identifier, not %q", opts.id)
+	}
+
+	root, ok := volumeRoot(opts.root)
+	if !ok {
+		return nil, fmt.Errorf("flux-op: --root must be an absolute path that leads where it says, not %q", opts.root)
+	}
+	opts.root = root
 
 	opts.staging, opts.destination = rest[0], rest[1]
 	if rest[2] != "--" {
@@ -154,6 +184,21 @@ func run(argv []string) int {
 		}
 	}()
 
+	// Asked for across the whole run, not only around a child.
+	//
+	// The executor runs this as PID 1, and the kernel delivers no signal to PID 1
+	// that the process has not asked for. So an unhandled TERM does not end the
+	// program the way it would anywhere else - it is discarded, the Go runtime
+	// gives up and exits 2, and NOTHING unwinds: the reclaim below never runs and
+	// a partial upload is left at a name the app owner cannot see.
+	//
+	// Registering here suppresses that for every phase, including the publish,
+	// where being ended between two renames is the one outcome this program
+	// exists to prevent.
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(signals)
+
 	// Only the commands that need an existing directory to write into ask for
 	// this. A file copy must NOT have it: cp -T refuses to overwrite a directory
 	// with a non-directory.
@@ -166,13 +211,38 @@ func run(argv []string) int {
 
 	switch {
 	case opts.fromStdin:
-		if _, err := receive(os.Stdin, opts.staging, opts.maxBytes); err != nil {
-			if errors.Is(err, errOverCeiling) {
-				fmt.Fprintf(os.Stderr, "flux-op: input is over the %d byte limit\n", opts.maxBytes)
-				return exitTooLarge
+		// There is no child here to forward the signal to, and the read cannot be
+		// interrupted: it wakes when bytes arrive or the sender closes, and a
+		// stalled sender does neither. Closing the descriptor does not help - the
+		// runtime does not poll standard input, so a read already blocked on it
+		// stays blocked, and the container is SIGKILLed at the end of its grace
+		// period with nothing unwound.
+		//
+		// So the transfer is waited ON rather than waited FOR: it runs in its own
+		// goroutine and this one takes whichever arrives first. A cancel then
+		// returns through the ordinary path, which is what runs the reclaim above.
+		// The abandoned goroutine writes into a descriptor whose file is being
+		// unlinked and the process is gone moments later; it creates nothing, so
+		// there is nothing for it to leave behind.
+		transfer := make(chan error, 1)
+		go func() {
+			_, err := receive(os.Stdin, opts.staging, opts.maxBytes)
+			transfer <- err
+		}()
+
+		select {
+		case <-signals:
+			fmt.Fprintln(os.Stderr, "flux-op: cancelled")
+			return exitCanceled
+		case err := <-transfer:
+			if err != nil {
+				if errors.Is(err, errOverCeiling) {
+					fmt.Fprintf(os.Stderr, "flux-op: input is over the %d byte limit\n", opts.maxBytes)
+					return exitTooLarge
+				}
+				fmt.Fprintf(os.Stderr, "flux-op: could not write the incoming data: %v\n", err)
+				return 1
 			}
-			fmt.Fprintf(os.Stderr, "flux-op: could not write the incoming data: %v\n", err)
-			return 1
 		}
 
 	case len(opts.command) > 0:
@@ -194,11 +264,21 @@ func run(argv []string) int {
 		// publishing it is the whole operation.
 	}
 
+	// A signal that arrived during a phase with nothing to interrupt still means
+	// the caller asked for this to stop, and stopping before the publish is what
+	// makes honouring it free.
+	select {
+	case <-signals:
+		fmt.Fprintln(os.Stderr, "flux-op: cancelled")
+		return exitCanceled
+	default:
+	}
+
 	// One pass over the result answers both questions. The ceiling is checked
 	// against what actually landed rather than against what the input claimed
 	// about itself, because those numbers are written by whoever built the
 	// archive and a bomb simply lies.
-	if opts.maxBytes > 0 || opts.noLinks {
+	if opts.maxBytes > 0 || opts.ordinaryOnly {
 		// --from-stdin has already enforced its own ceiling as it wrote, and
 		// cannot produce a link.
 		if !opts.fromStdin {
@@ -211,9 +291,9 @@ func run(argv []string) int {
 				fmt.Fprintf(os.Stderr, "flux-op: result is %d bytes, over the %d limit\n", result.bytes, opts.maxBytes)
 				return exitTooLarge
 			}
-			if opts.noLinks && result.hasLinks {
-				fmt.Fprintln(os.Stderr, "flux-op: result contains links, which are not accepted here")
-				return exitHasLinks
+			if opts.ordinaryOnly && result.hasIrregular {
+				fmt.Fprintln(os.Stderr, "flux-op: result holds something that is not ordinary data, which is not accepted here")
+				return exitNotOrdinary
 			}
 		}
 	}
@@ -237,6 +317,34 @@ func run(argv []string) int {
 // one that cannot be written down. Traversal still has to be refused by whoever
 // reads it - ".." is expressible in a relative path too - but the class does not
 // need checking for if it cannot be represented.
-func markerContents(destination, root string) string {
-	return strings.TrimPrefix(destination, strings.TrimSuffix(root, string(filepath.Separator))+string(filepath.Separator))
+func markerContents(destination, root string) (string, error) {
+	base := strings.TrimSuffix(filepath.Clean(root), string(filepath.Separator))
+	cleaned := filepath.Clean(destination)
+
+	relative := strings.TrimPrefix(cleaned, base+string(filepath.Separator))
+	// Unchanged means the prefix was not there. Trimming a prefix that is absent
+	// is a no-op, so without this the absolute path is what gets written down -
+	// which is the one shape this function exists to make unrepresentable.
+	if relative == cleaned || relative == "" {
+		return "", fmt.Errorf("%s is not inside %s, so where it belongs cannot be recorded", destination, root)
+	}
+	return relative, nil
+}
+
+// volumeRoot normalises the volume root, and reports whether it is one.
+//
+// Absolute, because everything here is built by joining onto it and a relative
+// root resolves against whatever directory this happened to be started in.
+// Rejected rather than cleaned when cleaning would CHANGE where it points: a
+// root of /work/../etc is a path that does not lead where it says, and silently
+// accepting it as /etc would put this program to work somewhere nobody named.
+func volumeRoot(root string) (string, bool) {
+	cleaned := filepath.Clean(root)
+	if !filepath.IsAbs(cleaned) {
+		return "", false
+	}
+	if cleaned != root && cleaned != strings.TrimRight(root, string(filepath.Separator)) {
+		return "", false
+	}
+	return cleaned, true
 }

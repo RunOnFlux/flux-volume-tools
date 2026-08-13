@@ -53,7 +53,7 @@ an unprivileged system user is meant to remove.
 ## `flux-op` — publishing a result atomically
 
 ```
-flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] [--max-bytes N] [--no-links] \
+flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] [--max-bytes N] [--ordinary-only] \
         <staging> <destination> -- [command [args...]]
 ```
 
@@ -110,8 +110,12 @@ the volume. Whoever reads it still has to refuse traversal — `..` is expressib
 in a relative path too — but the class that cannot be written down does not have
 to be checked for.
 
-`--max-bytes` caps what the command may leave in staging, and `--no-links`
-refuses a result containing symlinks or hard links. Both are checked **after**
+`--max-bytes` caps what the command may leave in staging, and `--ordinary-only`
+refuses a result holding anything that is not ordinary data — symlinks and hard
+links, which reach outside the result, and FIFOs, sockets and device nodes,
+which are not data at all. A FIFO matters as much as a link: whatever opens one
+without `O_NONBLOCK` waits for a writer that never comes, and `tar` both carries
+and recreates them. Both are checked **after**
 the command runs rather than from what an archive declares about itself: those
 figures are written by whoever built the archive, so a bomb simply lies about
 them. Staging is discarded on breach and the destination is never touched.
@@ -133,6 +137,50 @@ drift apart, and no second container spawn is needed per operation. Operands
 arrive as positional parameters and are never interpolated into a command
 string.
 
+## What a hostile archive cannot do
+
+Extraction is the one operation that runs attacker-supplied *structure* rather
+than attacker-supplied bytes, so it is worth recording what stops each classic
+archive trick — and which layer actually stops it, because several are not this
+program's doing.
+
+| Attempt | Outcome | What stops it |
+|---|---|---|
+| member named `../../../../etc/evil` | refused, nothing extracted | GNU tar — *"Member name contains '..'"* |
+| member named `/etc/hostname` | extracted as `etc/hostname` **inside** the target | GNU tar strips the leading `/` |
+| symlink, then a member written *through* it | the link is replaced by a real directory; nothing reaches the target | GNU tar |
+| a symlink left in the result | refused | `--ordinary-only` |
+| a hard link to data outside the result | refused | `--ordinary-only` |
+| a FIFO or socket | refused | `--ordinary-only` |
+| a device node | cannot be created at all | `CAP_MKNOD` is dropped; FluxOS also mounts the volume `nodev` |
+| a setuid binary | the bit survives extraction, and is **inert** | FluxOS mounts the app volume `nosuid` |
+| an archive of many tiny files | refused once what it **occupies** exceeds the ceiling | `--max-bytes`, measured on what landed rather than on what the archive declares |
+| anything reaching off the volume | nowhere to land | no network, read-only rootfs, the volume is the only mount |
+
+The tiny-files row is measured the way `du` reports by default, not `du -sb`. A file
+occupies whole blocks, so twenty thousand one-byte files are 20 KB by their own
+account and 82 MB on an ext4 volume — and the ceiling this is compared against is
+the volume's free space, which is a count of blocks. Measuring what the files say
+would compare two different kinds of number, and pass an extraction that had
+already exceeded the limit four thousand times over.
+
+Two of these are worth knowing rather than assuming.
+
+**The symlink defences are tar's, not ours.** `--ordinary-only` refuses a link
+*after* the command has run, so it catches a link left in the result — but a
+write *through* one would already have happened by then. What prevents it is GNU
+tar replacing the link with a directory. That is a reason the GNU pinning in the
+Contract below matters more than it appears: busybox tar is not the same program.
+
+**The setuid bit is preserved, and that is fine.** tar restores it and this
+program does not strip it, because the mount is where it is neutralised — one
+place, covering every route such a file can arrive by, including a plain copy.
+
+Verified by running each case in a container configured exactly as the executor
+configures one, on a filesystem that can hold the bits being tested. A bind mount
+from a macOS host silently drops setuid, which makes that row look safe when it
+is not being tested at all.
+
 ## Contract
 
 The image guarantees these binaries, with GNU / Info-ZIP semantics:
@@ -144,6 +192,13 @@ The image guarantees these binaries, with GNU / Info-ZIP semantics:
 | `unzip` | `unzip` | busybox's applet has no zip64, capping archives at 4 GB |
 | `zip` | `zip` | busybox has no zip applet at all |
 | `gzip` | busybox | applet is sufficient |
+
+`mv` is guaranteed but never driven: a move is a publish whose source is already
+the result, so `flux-op` renames rather than running anything. It is in the
+contract because the image promises it, and the test holds the image to it —
+`cp`'s guarantee was checked by grepping `--help` for `-T`, which busybox also
+lists and also implements, so the one case that existed to catch coreutils being
+dropped passed without it.
 
 There is no entrypoint. The executor always supplies argv.
 
@@ -159,6 +214,33 @@ The image is published for `linux/amd64` and `linux/arm64`. Pinning the manifest
 list digest resolves to the right architecture on each node; pinning a per-architecture
 digest instead would work on x86 and fail on every arm node.
 
+## Testing
+
+```
+./scripts/test.sh
+```
+
+Runs everything CI checks: formatting, `go vet` — twice, because the container
+tests sit behind a build tag the plain run never compiles — the unit tests with
+`-race`, both published architectures plus the host build, then it builds the
+image and runs the container suite against it.
+
+The two halves answer different questions and neither substitutes for the other:
+
+| | what it covers |
+|---|---|
+| `go test ./cmd/...` | what `flux-op` **decides** — the publish ordering, the ceiling, the marker, what is refused |
+| `go test -tags docker ./test/container/` | what the **image** does, in a container configured exactly as the executor configures it |
+
+Run the second half through the script rather than by hand. It needs a build tag
+*and* a freshly built image, so `go test ./...` runs none of it and still reports
+success — which is how a stale helper in that suite once sat failing for a whole
+session while the suite was believed green.
+
+`-count=1` is not optional for the container half: the image is an input the test
+cache cannot see, so rebuilding it and running again reports the previous result
+without ever starting a container. The script passes it.
+
 ## Releasing
 
 `.github/workflows/build.yml` builds both architectures and pushes to GHCR on:
@@ -173,5 +255,24 @@ It requires no secrets — GHCR publishing uses the automatic `GITHUB_TOKEN` wit
 
 Every build runs a smoke test first that asserts each binary above is the expected
 implementation, so a change in Alpine's packaging fails the build rather than
-shipping a busybox applet into production. The published manifest digest is written
-to the workflow run summary; that is the value to pin in FluxOS.
+shipping a busybox applet into production.
+
+**The image that is published is the image that was tested.** Each architecture is
+built once, pushed by digest with no tag on it, and then pulled back out of the
+registry and tested through it. Only once both have passed does a final job
+assemble the manifest list from those digests — so a tag never names bytes that
+nothing ran. It used to build a second time to publish, and since the Dockerfile
+pins a minor Alpine tag and installs unpinned packages, two builds minutes apart
+were not required to agree.
+
+A digest carrying no tag is not published in any useful sense — nothing can
+resolve to it without already knowing it — so a failed run leaves an unreferenced
+digest and no tag.
+
+The run summary prints the whole pin, ready to paste: the tag and both
+per-architecture image ids. The ids are the digests of each image's own *config*,
+which is what FluxOS verifies against, and they cannot be derived from the
+manifest list digest alone.
+
+Actions are pinned to commit SHAs rather than to major tags. A major tag is
+mutable and every job holds `packages: write`.

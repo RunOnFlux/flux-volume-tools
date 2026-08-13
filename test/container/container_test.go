@@ -130,7 +130,17 @@ func fluxOp(t *testing.T, volume, stdin string, args ...string) outcome {
 	if index < 0 {
 		t.Fatalf("flux-op never reported an exit code:\n%s", result.output)
 	}
-	code, err := strconv.Atoi(strings.TrimSpace(result.output[index+len(marker):]))
+	// The first line after the marker, not everything after it. stdout and
+	// stderr arrive on one stream here, and which lands last is a matter of
+	// buffering rather than of order - so a run that writes to stderr can put a
+	// diagnostic AFTER the marker, and reading to the end then parses the
+	// diagnostic as part of the number. That failed on one architecture and
+	// passed on the other in the same run.
+	tail := result.output[index+len(marker):]
+	if newline := strings.IndexByte(tail, '\n'); newline >= 0 {
+		tail = tail[:newline]
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(tail))
 	if err != nil {
 		t.Fatalf("could not read the exit code:\n%s", result.output)
 	}
@@ -166,7 +176,7 @@ func contents(t *testing.T, volume, name string) string {
 // saw from in there, so the comparison is made from the same side.
 func identityOf(t *testing.T, volume, name string) string {
 	t.Helper()
-	result := inContainer(t, volume, "", `stat -c '%i %.9Y' "$@"`, "/work/"+name)
+	result := inContainer(t, volume, "", `stat -c '%i %.9W %.9Y' "$@"`, "/work/"+name)
 	if result.exit != 0 {
 		t.Fatalf("could not stat %s (exit %d):\n%s", name, result.exit, result.output)
 	}
@@ -175,12 +185,27 @@ func identityOf(t *testing.T, volume, name string) string {
 	// exit code is read past below.
 	lines := strings.Split(strings.TrimSpace(result.output), "\n")
 	fields := strings.Fields(lines[len(lines)-1])
-	if len(fields) != 2 {
+	if len(fields) != 3 {
 		t.Fatalf("stat of %s returned %q", name, result.output)
 	}
-	// Seconds and nanoseconds arrive as one decimal number, padded to nine
-	// places, so removing the point is the whole conversion.
-	return fields[0] + " " + strings.Replace(fields[1], ".", "", 1)
+
+	// Both clocks are asked for and the choice is made here, from the same
+	// condition flux-op decides on rather than from what flux-op wrote: stat
+	// reports a birth time of zero exactly where statx leaves STATX_BTIME unset,
+	// which is the filesystem having no creation time to give. Deriving it
+	// independently is the point of this helper - reading the clock back out of
+	// the marker would make the comparison agree with itself.
+	inode, birth, modified := fields[0], fields[1], fields[2]
+	if strings.HasPrefix(birth, "0.") || birth == "0" {
+		return inode + " " + nanoseconds(modified) + " mtime"
+	}
+	return inode + " " + nanoseconds(birth) + " btime"
+}
+
+// Seconds and nanoseconds arrive from stat as one decimal number, padded to nine
+// places, so removing the point is the whole conversion.
+func nanoseconds(stamp string) string {
+	return strings.Replace(stamp, ".", "", 1)
 }
 
 func exists(volume, name string) bool {

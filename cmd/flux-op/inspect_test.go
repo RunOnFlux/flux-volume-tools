@@ -1,9 +1,12 @@
 package main
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -24,7 +27,7 @@ func TestInspectCountsEveryFileInTheTree(t *testing.T) {
 	if before.bytes < 350 {
 		t.Errorf("measured %d bytes, want at least the 350 of file content", before.bytes)
 	}
-	if before.hasLinks {
+	if before.hasIrregular {
 		t.Error("a tree with no links reported links")
 	}
 
@@ -60,10 +63,16 @@ func TestInspectFindsASymlinkAndDoesNotFollowIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.hasLinks {
+	if !result.hasIrregular {
 		t.Error("the symlink was not reported")
 	}
-	if result.bytes > 10000 {
+	// Bounded well below the 100,000 bytes behind the link and well above the
+	// handful of blocks a three-entry tree occupies. The old bound of 10,000 was
+	// calibrated against apparent sizes and had no room in it once entries were
+	// measured by what they occupy: on ext4 this tree is 12,288 bytes of blocks
+	// and on APFS it is a fraction of that, so the same figure passed locally
+	// and failed in CI.
+	if result.bytes > 50000 {
 		t.Errorf("measured %d bytes - the walk followed the link and measured what is behind it", result.bytes)
 	}
 }
@@ -84,7 +93,7 @@ func TestInspectDoesNotDescendThroughALinkedDirectory(t *testing.T) {
 
 	select {
 	case result := <-done:
-		if !result.hasLinks {
+		if !result.hasIrregular {
 			t.Error("the linked directory was not reported as a link")
 		}
 	case <-timeoutAfterSeconds(10):
@@ -103,7 +112,7 @@ func TestInspectCountsHardLinkedDataOnceAndReportsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if before.hasLinks {
+	if before.hasIrregular {
 		t.Fatal("a tree with one ordinary file reported links")
 	}
 
@@ -115,7 +124,7 @@ func TestInspectCountsHardLinkedDataOnceAndReportsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !after.hasLinks {
+	if !after.hasIrregular {
 		t.Error("the hard link was not reported")
 	}
 	if grew := after.bytes - before.bytes; grew >= 5000 {
@@ -141,10 +150,155 @@ func TestInspectMeasuresASingleFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.bytes != 1234 {
-		t.Errorf("measured %d bytes, want 1234", result.bytes)
+	// What it OCCUPIES, which is its length rounded up to whole blocks - not the
+	// 1234 it reports for itself. The ceiling this feeds is the volume's free
+	// space, so the two have to be the same kind of number.
+	if result.bytes < 1234 {
+		t.Errorf("measured %d bytes, want at least the 1234 the file holds", result.bytes)
 	}
-	if result.hasLinks {
+	if result.hasIrregular {
 		t.Error("a plain file reported links")
+	}
+}
+
+// Twenty thousand one-byte files are 20KB by their own account and 82MB on the
+// disk they sit on. The ceiling exists to stop an extraction filling the volume,
+// and it is handed the volume's free space - so measuring what the files SAY
+// leaves it comparing two different kinds of number, and passing an extraction
+// that has already consumed thousands of times its measured size.
+func TestInspectMeasuresWhatTheVolumeLosesNotWhatTheFilesSay(t *testing.T) {
+	root := t.TempDir()
+
+	const files = 200
+	for i := 0; i < files; i++ {
+		write(t, filepath.Join(root, "f"+strconv.Itoa(i)), "x")
+	}
+
+	// A filesystem that keeps a small file inside its inode reports no blocks
+	// for it, and there is no difference here to measure. Proven rather than
+	// assumed, so this cannot pass by measuring nothing.
+	info, err := os.Lstat(filepath.Join(root, "f0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); !ok || stat.Blocks == 0 {
+		t.Skip("this filesystem stores a one-byte file without allocating a block")
+	}
+
+	result, err := inspect(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// st_blocks is counted in 512-byte units whatever the filesystem's own block
+	// size is, and a file holding a byte has to occupy at least one. So the floor
+	// is files*512 - two orders of magnitude above the `files` bytes they report
+	// between them, which is what makes this fail on the apparent figure rather
+	// than merely reading differently.
+	apparent := int64(0)
+	filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info, infoErr := entry.Info(); infoErr == nil {
+			apparent += info.Size()
+		}
+		return nil
+	})
+
+	if result.bytes < files*512 {
+		t.Errorf("measured %d bytes for %d one-byte files (apparent size of the tree is %d); "+
+			"that is what the files say rather than what they occupy",
+			result.bytes, files, apparent)
+	}
+}
+
+// The RESULT itself being a link is a different question from a link inside it,
+// and the ceiling is the reason. A walk that does not follow links measures a
+// link as the few bytes of its own path, so a staging path pointing at a tree of
+// any size measures as nothing and passes any --max-bytes it is given.
+//
+// Not reachable today - FluxOS names staging with a fresh randomUUID the
+// application never learns - but the safety of the ceiling should not rest on
+// the caller having chosen an unguessable name, which is an invariant this
+// program neither states nor can check.
+func TestInspectRefusesAResultThatIsItselfALink(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "elsewhere")
+	write(t, filepath.Join(target, "big"), strings.Repeat("x", 5000))
+
+	staging := filepath.Join(root, "staging")
+	if err := os.Symlink(target, staging); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := inspect(staging); err == nil {
+		t.Fatal("inspecting a result that is a link succeeded")
+	}
+}
+
+// An entry that cannot be read is skipped rather than fatal, which is what du
+// does. Whether its contents would have breached the ceiling is unknowable
+// either way, and failing the measurement would refuse an operation over a
+// directory the application merely happened to make unreadable.
+func TestInspectSkipsWhatItCannotRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root, where an unreadable directory is not unreadable")
+	}
+
+	root := t.TempDir()
+	write(t, filepath.Join(root, "readable"), strings.Repeat("x", 100))
+	closed := filepath.Join(root, "closed")
+	write(t, filepath.Join(closed, "hidden"), strings.Repeat("x", 5000))
+	if err := os.Chmod(closed, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(closed, 0o755) })
+
+	result, err := inspect(root)
+	if err != nil {
+		t.Fatalf("a directory that could not be read failed the whole measurement: %v", err)
+	}
+	// The readable file is still counted, so the walk carried on rather than
+	// stopping at the entry it could not open.
+	if result.bytes < 100 {
+		t.Errorf("measured %d bytes, want at least the 100 it could read", result.bytes)
+	}
+}
+
+// A link is not the only entry that is not ordinary data. A FIFO carries none at
+// all: whatever opens it without O_NONBLOCK waits for a writer that is never
+// coming, and tar both carries and recreates one - so an archive is all it takes
+// to put one on the volume.
+//
+// Device nodes cannot be made here, because CAP_MKNOD is dropped. FIFOs and
+// sockets need no capability at all.
+func TestInspectFindsAnEntryThatIsNotOrdinaryData(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, "ordinary"), "data")
+	if err := syscall.Mkfifo(filepath.Join(root, "pipe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := inspect(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.hasIrregular {
+		t.Error("a FIFO in the result was not reported, so --ordinary-only would publish it")
+	}
+}
+
+// The directory holding the result is itself not a regular file, and refusing it
+// would refuse every extraction there is.
+func TestInspectDoesNotCallADirectoryIrregular(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, "nested", "deeper", "file"), "data")
+
+	result, err := inspect(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.hasIrregular {
+		t.Error("an ordinary tree of files and directories was refused")
 	}
 }

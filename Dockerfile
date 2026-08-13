@@ -14,7 +14,13 @@
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 
 WORKDIR /src
-COPY go.mod ./
+# Dependencies resolved in their own layer, so a change to the source does not
+# refetch them. go.sum is what pins them: x/sys is the only one, and flux-op
+# needs it for statx, which is the syscall that reports an object's creation
+# time and whether the filesystem actually keeps one.
+COPY go.mod go.sum ./
+RUN go mod download
+
 COPY cmd ./cmd
 
 ARG TARGETARCH

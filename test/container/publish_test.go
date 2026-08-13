@@ -119,7 +119,7 @@ func TestAResultContainingALinkIsRefused(t *testing.T) {
 
 	staging := "/work/.flux-op-" + operationID
 	result := fluxOp(t, volume, "",
-		append(baseArgs("--discard-staging", "--no-links", staging, "/work/dest", "--"),
+		append(baseArgs("--discard-staging", "--ordinary-only", staging, "/work/dest", "--"),
 			"cp", "-a", "-T", "/work/src", staging)...)
 
 	if result.exit != 4 {
@@ -189,47 +189,34 @@ func TestAFailureNeverDiscardsAnOperandTheCallerOwns(t *testing.T) {
 // aside and the replacement never arrived. Reproduced by publishing a staging
 // path that does not exist, so the second rename fails exactly where a crash
 // would land.
-func TestAnInterruptedPublishLeavesTheDataAndAMarkerThatPlacesIt(t *testing.T) {
+// Neither operand may contain the other, refused in the image and under the
+// configuration a node runs it with.
+//
+// Displacing the destination takes everything beneath it, so a destination
+// containing the staging path carries it away and the publish cannot finish -
+// and completing it would mean deleting the rest of that folder, entries the
+// caller never named. The interrupted state this used to reach is exercised in
+// the unit tests, which can make a rename fail without an operation that could
+// never have worked.
+func TestPublishRefusesOperandsThatContainOneAnother(t *testing.T) {
 	volume := volumeDir(t)
-	seed(t, volume, `mkdir -p /work/x/y/out && echo precious > /work/x/y/out/2024`)
+	seed(t, volume, `mkdir -p /work/x/y/out/2024 && echo precious > /work/x/y/out/2024/photo && echo irreplaceable > /work/x/y/out/wedding`)
 
-	// A directory published over its own parent, which is a move a user can ask
-	// for. The first rename carries the staging path away inside the
-	// destination, so the second finds nothing at it and the publish stops
-	// between the two - the state a crash in that window leaves, without having
-	// to kill the process to reach it.
 	result := fluxOp(t, volume, "", baseArgs("/work/x/y/out/2024", "/work/x/y/out", "--")...)
 
 	if result.exit == 0 {
 		t.Fatalf("publishing a directory over its own parent succeeded:\n%s", result.output)
 	}
 
-	displaced := ".flux-old-" + operationID
-	if got := contents(t, volume, displaced+"/2024"); got != "precious" {
-		t.Errorf("displaced data holds %q, want precious\n%s", got, tree(volume))
+	// Refused before anything moved, which is the whole difference between an
+	// operation that did not happen and one that took the caller's folder away.
+	if got := contents(t, volume, "x/y/out/wedding"); got != "irreplaceable" {
+		t.Errorf("a file the caller never named holds %q\n%s", got, tree(volume))
 	}
-	if exists(volume, "x/y/out") {
-		t.Error("the destination is still there, so this is not the interrupted state")
+	if got := contents(t, volume, "x/y/out/2024/photo"); got != "precious" {
+		t.Errorf("the operand holds %q\n%s", got, tree(volume))
 	}
-
-	// Relative, so nothing that reads it can be sent off the volume by following
-	// an absolute path. At the volume root, which is the one directory the sweep
-	// reads - not beside the destination, wherever the caller kept it.
-	marker := contents(t, volume, displaced+".dest")
-	lines := strings.Split(marker, "\n")
-	if len(lines) != 2 {
-		t.Fatalf("marker holds %q, want a destination and an identity", marker)
-	}
-	if lines[0] != "x/y/out" {
-		t.Errorf("marker names %q, want x/y/out", lines[0])
-	}
-
-	// The identity is read from the displaced copy: rename preserved it, which
-	// is the property that lets a sweep tell the published object from one the
-	// app owner put at the same path.
-	if want := identityOf(t, volume, displaced+"/2024"); lines[1] != want {
-		t.Errorf("marker identity is %q, want %q\n%s", lines[1], want, tree(volume))
-	}
+	requireNoArtefacts(t, volume)
 }
 
 // Nothing is displaced over an operation that cannot be carried out, so there is
