@@ -66,49 +66,53 @@ the caller's source already *is* the result, so publishing it is the whole
 operation.
 
 `--id` and `--root` name what an interrupted publish leaves behind and where —
-`<root>/.flux-old-<id>` and its marker. Neither is derived from `<staging>`,
-because `<staging>` is not always something this script created: for a move it is
-the caller's own path, at whatever depth they keep it. A name derived from it is
-indistinguishable from a folder the user chose, and a location derived from it
-lands outside the one directory the sweep reads.
+`<root>/.flux-op-<id>`. Neither is derived from `<staging>`, because `<staging>`
+is not always something this script created: for a move it is the caller's own
+path, at whatever depth they keep it. A name derived from it is indistinguishable
+from a folder the user chose, and a location derived from it lands outside the
+one directory the sweep reads.
 
 `--discard-staging` says the staging operand is scratch this operation created,
-so a failure may throw it away. **Without it, staging is never deleted** — for a
-move that operand is the only copy of the caller's data. Opt-in rather than
+so a FAILURE may throw it away. **Without it, a failure never deletes staging** —
+for a move that operand is the only copy of the caller's data. Opt-in rather than
 opt-out, because the safe behaviour has to be the one a forgetful caller gets.
+
+It says nothing about success. Once the exchange below has happened the staging
+name holds the caller's PREVIOUS data and the destination holds what they asked
+for, so that entry is removed either way.
 
 A cancellation arrives as `SIGTERM` (docker `stop`, not `kill`). The command runs
 as a child so this script survives to trap it, forwards the signal — a container
 stop reaches only PID 1 — and reclaims staging before exiting. `SIGKILL` bypasses
 all of that, and the startup sweep remains the backstop for it.
 
-Publishing goes through a swap — move the old entry aside, move the new one in,
-delete the old — rather than a delete-then-rename. `rename(2)` refuses a
-non-empty directory as its target and cannot replace a file with a directory at
-all, so `mv` alone would have to delete first, and a crash in that window loses
-the destination outright. Both renames in the swap are atomic, so the worst a
-crash leaves is the previous data under `.flux-old-*`.
+Publishing is ONE step: `renameat2(RENAME_EXCHANGE)` swaps the staging entry and
+the destination. There is no in-between state to be interrupted in — either the
+entries are swapped or they are not, and the destination holds something complete
+either way. A plain `mv` cannot do this: `rename(2)` refuses a non-empty directory
+as its target and cannot replace a file with a directory at all, so it would have
+to delete first, and a crash in that window loses the destination outright.
+
+Where the platform offers no atomic exchange the publish refuses rather than
+falling back. A guarantee that holds on some nodes and not others, decided by
+something no caller can see, is worse than none.
 
 Leftovers are named for a startup sweep to recognise:
 
 | Left behind | Means | Recovery |
 |---|---|---|
-| `.flux-op-*` | the operation never completed | delete; nobody is waiting for it |
-| `.flux-old-<id>`, destination missing | crash between the two renames | rename it back |
-| `.flux-old-<id>`, destination present | the swap completed | delete |
-| `.flux-old-<id>.dest` | records where `.flux-old-<id>` belongs | delete with it |
+| `.flux-op-<id>` | the operation never completed, or was interrupted around the exchange | delete; nobody is waiting for it, and the destination is complete either way |
 
-The `.dest` marker is written *before* the old entry is moved aside. Without it a
-crash between the two renames would leave the caller's only copy of that data
-under a name that says nothing about where it came from, and the sweep would
-delete it.
+That is the whole recovery rule, and it is unconditional: no marker to parse, no
+recorded identity to compare, and nothing read from a directory the app owner can
+also write to.
 
-It records the destination **relative to `--root`**. The marker sits in a
-directory the app owner can write to, so its contents are input rather than
-state: an absolute path in there is a path a privileged reader might follow off
-the volume. Whoever reads it still has to refuse traversal — `..` is expressible
-in a relative path too — but the class that cannot be written down does not have
-to be checked for.
+Recovery must not depend on identifying an entry, and that is not a stylistic
+preference. On ext4, measured over 200 back-to-back creations, a reused inode
+number came back **every** time and the creation time collided **108** times — so
+a sweep deciding whether to delete somebody's only copy on that evidence is
+deciding on a coincidence. Removing the window the identity existed to survive is
+what makes the question go away.
 
 `--max-bytes` caps what the command may leave in staging, and `--ordinary-only`
 refuses a result holding anything that is not ordinary data — symlinks and hard
@@ -229,7 +233,7 @@ The two halves answer different questions and neither substitutes for the other:
 
 | | what it covers |
 |---|---|
-| `go test ./cmd/...` | what `flux-op` **decides** — the publish ordering, the ceiling, the marker, what is refused |
+| `go test ./cmd/...` | what `flux-op` **decides** — the exchange, the ceiling, the recovery rule, what is refused |
 | `go test -tags docker ./test/container/` | what the **image** does, in a container configured exactly as the executor configures it |
 
 Run the second half through the script rather than by hand. It needs a build tag
