@@ -172,18 +172,32 @@ func seed(t *testing.T, volume, script string) {
 	}
 }
 
+// contents reads a file through the image, which is the only way to read one on
+// a named volume - and the more honest question anyway, since it sees what the
+// running application sees.
+//
+// Everything AFTER a marker, not the last line. Running a foreign architecture
+// under emulation makes docker print a platform warning before the container's
+// own output, and an EMPTY file produces nothing of its own - so the last line
+// is then the warning, and the file appears to hold it. Caught on the arm64 leg
+// by the one test that reads an empty file; amd64 prints no warning and passed.
+// This is the same shape as the exit code, which is read past the same noise.
 func contents(t *testing.T, volume, name string) string {
 	t.Helper()
-	result := inContainer(t, volume, "", `cat "$@"`, "/work/"+name)
+	const marker = "FLUXOP_CAT="
+	result := inContainer(t, volume, "", `echo "FLUXOP_CAT="; cat "$@"`, "/work/"+name)
 	if result.exit != 0 {
 		t.Fatalf("reading %s (exit %d):\n%s%s", name, result.exit, result.output, tree(t, volume))
 	}
-	return strings.TrimRight(lastLine(result.output), "\n")
+	index := strings.LastIndex(result.output, marker)
+	if index < 0 {
+		t.Fatalf("reading %s: the container produced no marked output:\n%s", name, result.output)
+	}
+	return strings.TrimRight(strings.TrimPrefix(result.output[index+len(marker):], "\n"), "\n")
 }
 
-// The last line of a container's output. Running a foreign architecture under
-// emulation puts a platform warning ahead of it, which is the same noise the
-// exit code is read past.
+// The last line of a container's output, past the platform warning emulation
+// prints ahead of it. Only for output that always has a last line of its own.
 func lastLine(output string) string {
 	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
 	return lines[len(lines)-1]
