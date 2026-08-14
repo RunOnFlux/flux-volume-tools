@@ -30,10 +30,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The identifier FluxOS passes. Its exact shape is what lets the boot sweep tell
@@ -77,18 +77,33 @@ type outcome struct {
 // volumeDir gives the test a directory bound in as the app volume, and removes
 // it through a container afterwards - what the container writes is owned by
 // root, and the test process cannot delete a root-owned tree.
+// volumeDir is a docker NAMED VOLUME, not a host directory bind-mounted in.
+//
+// This suite exists to say what the image does on the filesystem a node puts an
+// app volume on, and a bind mount from a macOS host is not one: Docker Desktop
+// serves it through a shim which reports its type as "fakeowner", drops setuid
+// bits, and - the reason this changed - refuses to exchange two entries of
+// different types atomically, answering with the error a plain rename gives. A
+// named volume is real Linux ext4 wherever docker runs.
+//
+// CI would never have caught the difference. A bind mount on a Linux runner IS
+// the runner's ext4, so the suite passed there and failed only on the machine
+// the code is written on - which is the worst way round, because that is where
+// it is run before pushing.
+//
+// The cost is that nothing here can read the volume from the host, so the
+// helpers below ask the image instead. That is the more honest question anyway:
+// they now see what the running application sees.
 func volumeDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "flux-op-volume-")
-	if err != nil {
-		t.Fatal(err)
+	name := fmt.Sprintf("flux-op-test-%d-%d", os.Getpid(), time.Now().UnixNano())
+	if out, err := exec.Command("docker", "volume", "create", name).CombinedOutput(); err != nil {
+		t.Fatalf("could not create the test volume: %v\n%s", err, out)
 	}
 	t.Cleanup(func() {
-		exec.Command("docker", "run", "--rm", "--volume", dir+":/work", image(),
-			"sh", "-c", "rm -rf /work/..?* /work/.[!.]* /work/* 2>/dev/null; true").Run()
-		os.RemoveAll(dir)
+		exec.Command("docker", "volume", "rm", "-f", name).Run()
 	})
-	return dir
+	return name
 }
 
 // inContainer runs a shell script in the image, with args available to it as
@@ -159,47 +174,19 @@ func seed(t *testing.T, volume, script string) {
 
 func contents(t *testing.T, volume, name string) string {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(volume, name))
-	if err != nil {
-		t.Fatalf("reading %s: %v\n%s", name, err, tree(volume))
+	result := inContainer(t, volume, "", `cat "$@"`, "/work/"+name)
+	if result.exit != 0 {
+		t.Fatalf("reading %s (exit %d):\n%s%s", name, result.exit, result.output, tree(t, volume))
 	}
-	return strings.TrimRight(string(data), "\n")
+	return strings.TrimRight(lastLine(result.output), "\n")
 }
 
-// What a sweep compares, derived independently of the code under test so the
-// format is pinned rather than echoed back.
-//
-// Read from inside a container, because an inode number belongs to the
-// filesystem that issued it and a bind mount does not always carry it across
-// unchanged: Docker Desktop synthesises its own on macOS, where a node's Linux
-// bind mount hands back the same number the host sees. flux-op recorded what it
-// saw from in there, so the comparison is made from the same side.
-func identityOf(t *testing.T, volume, name string) string {
-	t.Helper()
-	result := inContainer(t, volume, "", `stat -c '%i %.9W %.9Y' "$@"`, "/work/"+name)
-	if result.exit != 0 {
-		t.Fatalf("could not stat %s (exit %d):\n%s", name, result.exit, result.output)
-	}
-	// The last line, not the whole output: running a foreign architecture under
-	// emulation puts a platform warning ahead of it, which is the same noise the
-	// exit code is read past below.
-	lines := strings.Split(strings.TrimSpace(result.output), "\n")
-	fields := strings.Fields(lines[len(lines)-1])
-	if len(fields) != 3 {
-		t.Fatalf("stat of %s returned %q", name, result.output)
-	}
-
-	// Both clocks are asked for and the choice is made here, from the same
-	// condition flux-op decides on rather than from what flux-op wrote: stat
-	// reports a birth time of zero exactly where statx leaves STATX_BTIME unset,
-	// which is the filesystem having no creation time to give. Deriving it
-	// independently is the point of this helper - reading the clock back out of
-	// the marker would make the comparison agree with itself.
-	inode, birth, modified := fields[0], fields[1], fields[2]
-	if strings.HasPrefix(birth, "0.") || birth == "0" {
-		return inode + " " + nanoseconds(modified) + " mtime"
-	}
-	return inode + " " + nanoseconds(birth) + " btime"
+// The last line of a container's output. Running a foreign architecture under
+// emulation puts a platform warning ahead of it, which is the same noise the
+// exit code is read past.
+func lastLine(output string) string {
+	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
+	return lines[len(lines)-1]
 }
 
 // Seconds and nanoseconds arrive from stat as one decimal number, padded to nine
@@ -208,42 +195,29 @@ func nanoseconds(stamp string) string {
 	return strings.Replace(stamp, ".", "", 1)
 }
 
-func exists(volume, name string) bool {
-	_, err := os.Lstat(filepath.Join(volume, name))
-	return err == nil
+func exists(t *testing.T, volume, name string) bool {
+	t.Helper()
+	result := inContainer(t, volume, "", `test -e "$@"; echo $?`, "/work/"+name)
+	return strings.TrimSpace(lastLine(result.output)) == "0"
 }
 
 // tree is what a failure prints. The suite this replaced discarded the
 // container's output entirely, so a failure named the scenario and nothing else.
-func tree(volume string) string {
-	var out strings.Builder
-	out.WriteString("volume holds:\n")
-	filepath.Walk(volume, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		relative, _ := filepath.Rel(volume, path)
-		if relative == "." {
-			return nil
-		}
-		fmt.Fprintf(&out, "  %s %s\n", info.Mode(), relative)
-		return nil
-	})
-	return out.String()
+func tree(t *testing.T, volume string) string {
+	t.Helper()
+	result := inContainer(t, volume, "", `find /work -mindepth 1 -printf '  %M %P\n' 2>/dev/null | sort`)
+	return "volume holds:\n" + result.output
 }
 
 // artefacts are the entries an interrupted operation leaves at the volume root.
 // A completed one leaves none.
 func artefacts(t *testing.T, volume string) []string {
 	t.Helper()
-	entries, err := os.ReadDir(volume)
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := inContainer(t, volume, "", `ls -A /work | grep '^\.flux-' || true`)
 	var names []string
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".flux-") {
-			names = append(names, entry.Name())
+	for _, line := range strings.Split(strings.TrimSpace(result.output), "\n") {
+		if name := strings.TrimSpace(line); strings.HasPrefix(name, ".flux-") {
+			names = append(names, name)
 		}
 	}
 	return names
@@ -252,7 +226,7 @@ func artefacts(t *testing.T, volume string) []string {
 func requireNoArtefacts(t *testing.T, volume string) {
 	t.Helper()
 	if left := artefacts(t, volume); len(left) != 0 {
-		t.Errorf("left behind %v\n%s", left, tree(volume))
+		t.Errorf("left behind %v\n%s", left, tree(t, volume))
 	}
 }
 

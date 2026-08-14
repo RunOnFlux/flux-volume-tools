@@ -60,12 +60,12 @@ func TestPublishReplacesEveryCombinationOfTypes(t *testing.T) {
 			if result.exit != 0 {
 				t.Fatalf("exit %d:\n%s", result.exit, result.output)
 			}
-			if !exists(volume, testCase.wantAtDest) {
-				t.Errorf("%s is not there\n%s", testCase.wantAtDest, tree(volume))
+			if !exists(t, volume, testCase.wantAtDest) {
+				t.Errorf("%s is not there\n%s", testCase.wantAtDest, tree(t, volume))
 			}
-			if testCase.wantMissing != "" && exists(volume, testCase.wantMissing) {
+			if testCase.wantMissing != "" && exists(t, volume, testCase.wantMissing) {
 				t.Errorf("%s survived - the destination was merged into, not replaced\n%s",
-					testCase.wantMissing, tree(volume))
+					testCase.wantMissing, tree(t, volume))
 			}
 			requireNoArtefacts(t, volume)
 		})
@@ -103,7 +103,7 @@ func TestAResultOverTheCeilingIsRefusedAndReclaimed(t *testing.T) {
 	if result.exit != 3 {
 		t.Fatalf("exit %d, want 3:\n%s", result.exit, result.output)
 	}
-	if exists(volume, "dest") {
+	if exists(t, volume, "dest") {
 		t.Error("the destination was published despite the refusal")
 	}
 	requireNoArtefacts(t, volume)
@@ -125,7 +125,7 @@ func TestAResultContainingALinkIsRefused(t *testing.T) {
 	if result.exit != 4 {
 		t.Fatalf("exit %d, want 4:\n%s", result.exit, result.output)
 	}
-	if exists(volume, "dest") {
+	if exists(t, volume, "dest") {
 		t.Error("the destination was published despite the refusal")
 	}
 	requireNoArtefacts(t, volume)
@@ -143,10 +143,10 @@ func TestAMovePublishesWithNoCommandAtAll(t *testing.T) {
 	if result.exit != 0 {
 		t.Fatalf("exit %d:\n%s", result.exit, result.output)
 	}
-	if !exists(volume, "out/f") {
-		t.Errorf("the move did not publish\n%s", tree(volume))
+	if !exists(t, volume, "out/f") {
+		t.Errorf("the move did not publish\n%s", tree(t, volume))
 	}
-	if exists(volume, "photos") {
+	if exists(t, volume, "photos") {
 		t.Error("the source survived the move")
 	}
 	requireNoArtefacts(t, volume)
@@ -185,10 +185,6 @@ func TestAFailureNeverDiscardsAnOperandTheCallerOwns(t *testing.T) {
 	}
 }
 
-// The state the marker exists for: the caller's previous data has been moved
-// aside and the replacement never arrived. Reproduced by publishing a staging
-// path that does not exist, so the second rename fails exactly where a crash
-// would land.
 // Neither operand may contain the other, refused in the image and under the
 // configuration a node runs it with.
 //
@@ -211,10 +207,10 @@ func TestPublishRefusesOperandsThatContainOneAnother(t *testing.T) {
 	// Refused before anything moved, which is the whole difference between an
 	// operation that did not happen and one that took the caller's folder away.
 	if got := contents(t, volume, "x/y/out/wedding"); got != "irreplaceable" {
-		t.Errorf("a file the caller never named holds %q\n%s", got, tree(volume))
+		t.Errorf("a file the caller never named holds %q\n%s", got, tree(t, volume))
 	}
 	if got := contents(t, volume, "x/y/out/2024/photo"); got != "precious" {
-		t.Errorf("the operand holds %q\n%s", got, tree(volume))
+		t.Errorf("the operand holds %q\n%s", got, tree(t, volume))
 	}
 	requireNoArtefacts(t, volume)
 }
@@ -231,11 +227,9 @@ func TestAMissingStagingPathFailsBeforeAnythingMoves(t *testing.T) {
 		t.Fatalf("publishing a staging path that does not exist succeeded:\n%s", result.output)
 	}
 	if got := contents(t, volume, "x/y/out"); got != "precious" {
-		t.Errorf("destination holds %q, want precious\n%s", got, tree(volume))
+		t.Errorf("destination holds %q, want precious\n%s", got, tree(t, volume))
 	}
-	if exists(volume, ".flux-old-"+operationID) || exists(volume, ".flux-old-"+operationID+".dest") {
-		t.Errorf("an operation that never started left artefacts behind\n%s", tree(volume))
-	}
+	requireNoArtefacts(t, volume)
 }
 
 // tar -C and unzip -d both need the directory to exist already. A file copy must
@@ -288,7 +282,7 @@ func TestACancelledOperationStopsItsCommandAndReclaimsStaging(t *testing.T) {
 	// Wait for the operation to actually be under way, so the stop cannot
 	// arrive before there is anything to stop.
 	deadline := time.Now().Add(30 * time.Second)
-	for !exists(volume, ".flux-op-"+operationID) {
+	for !exists(t, volume, ".flux-op-"+operationID) {
 		if time.Now().After(deadline) {
 			t.Fatal("the operation never created its staging directory")
 		}
@@ -331,7 +325,7 @@ func TestTheIdentifierAndVolumeRootAreRequired(t *testing.T) {
 		if result.exit != 2 {
 			t.Errorf("exit %d for %v, want 2:\n%s", result.exit, argv, result.output)
 		}
-		if exists(volume, "dest") {
+		if exists(t, volume, "dest") {
 			t.Error("a refused invocation touched the destination")
 		}
 	}

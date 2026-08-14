@@ -92,10 +92,10 @@ func TestCopyDoesNotNestIntoAnExistingDestination(t *testing.T) {
 		t.Fatalf("exit %d:\n%s", result.exit, result.output)
 	}
 
-	if !exists(volume, "dst/f") {
+	if !exists(t, volume, "dst/f") {
 		t.Error("the copy did not land")
 	}
-	if exists(volume, "dst/src") {
+	if exists(t, volume, "dst/src") {
 		t.Error("the copy nested inside the destination instead of becoming it")
 	}
 }

@@ -44,8 +44,8 @@ func TestAnArchiveThatTraversesIsRefused(t *testing.T) {
 	if !strings.Contains(result.output, "..") {
 		t.Errorf("the refusal did not name what was wrong:\n%s", result.output)
 	}
-	if exists(volume, "out") {
-		t.Errorf("something was published\n%s", tree(volume))
+	if exists(t, volume, "out") {
+		t.Errorf("something was published\n%s", tree(t, volume))
 	}
 	requireNoArtefacts(t, volume)
 }
@@ -65,7 +65,7 @@ func TestAnArchiveWithAnAbsoluteMemberLandsInsideTheTarget(t *testing.T) {
 	// Published under the destination, carrying its original path as a relative
 	// one - not written to the path it asked for.
 	if got := contents(t, volume, "out/work/hostname"); got != "pwned" {
-		t.Errorf("the member landed as %q\n%s", got, tree(volume))
+		t.Errorf("the member landed as %q\n%s", got, tree(t, volume))
 	}
 }
 
@@ -111,7 +111,7 @@ func TestAResultHoldingAFifoIsRefused(t *testing.T) {
 			result.exit, result.output)
 	}
 	if got := contents(t, volume, "out"); got != "original" {
-		t.Errorf("the destination holds %q, so a FIFO was published over it\n%s", got, tree(volume))
+		t.Errorf("the destination holds %q, so a FIFO was published over it\n%s", got, tree(t, volume))
 	}
 	requireNoArtefacts(t, volume)
 }
@@ -140,8 +140,8 @@ func TestAnArchiveOfManyTinyFilesIsMeasuredByWhatItOccupies(t *testing.T) {
 		t.Errorf("exit %d, want 3 - the code that says the result was over the ceiling\n%s",
 			result.exit, result.output)
 	}
-	if exists(volume, "out") {
-		t.Errorf("an extraction over the ceiling was published\n%s", tree(volume))
+	if exists(t, volume, "out") {
+		t.Errorf("an extraction over the ceiling was published\n%s", tree(t, volume))
 	}
 	requireNoArtefacts(t, volume)
 }

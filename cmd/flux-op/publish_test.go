@@ -115,12 +115,11 @@ func TestPublishReplacesEveryCombinationOfTypes(t *testing.T) {
 				t.Errorf("destination holds %q, want %q", got, testCase.expectAtDest)
 			}
 
-			// The swap directory and its marker are transient; a completed
-			// publish leaves neither.
-			for _, leftover := range []string{swapPrefix + testID, swapPrefix + testID + markerSuffix} {
-				if _, err := os.Lstat(filepath.Join(root, leftover)); err == nil {
-					t.Errorf("%s was left behind", leftover)
-				}
+			// A completed publish leaves the staging name empty. The old
+			// data is under it between the exchange and the cleanup, and
+			// the cleanup is the last thing publish does.
+			if _, err := os.Lstat(staging); err == nil {
+				t.Error("the staging entry was left behind")
 			}
 		})
 	}
@@ -157,19 +156,6 @@ func TestPublishTreatsADanglingSymlinkAsAnExistingEntry(t *testing.T) {
 // aside and the replacement never arrived. Reproduced by publishing a staging
 // path that does not exist, so the second rename fails exactly where a crash
 // would land.
-// What a sweep compares. identity() is a unit in its own right, with its own
-// tests for the property that matters - that it does not move when the object
-// is written to - so what these tests pin is that the marker holds the identity
-// of the PUBLISHED object rather than of the displaced one.
-func identityOf(t *testing.T, path string) string {
-	t.Helper()
-	got, err := identity(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return got
-}
-
 // interruptedPublish builds the state a crash between the two renames leaves:
 // the destination displaced, and the second rename then failing.
 //
@@ -203,53 +189,6 @@ func interruptedPublish(t *testing.T, displaced string) (root, staging, destinat
 	return root, staging, destination
 }
 
-func TestAnInterruptedPublishLeavesTheDataAndAMarkerThatPlacesIt(t *testing.T) {
-	root, staging, destination := interruptedPublish(t, "THE ONLY COPY")
-
-	if err := publish(staging, destination, root, testID); err == nil {
-		t.Fatal("a publish that could not complete reported success")
-	}
-
-	displaced := filepath.Join(root, swapPrefix+testID)
-	if got := read(t, displaced); got != "THE ONLY COPY" {
-		t.Errorf("displaced data holds %q, want THE ONLY COPY", got)
-	}
-	if _, err := os.Lstat(destination); !os.IsNotExist(err) {
-		t.Error("the destination is still there, so this is not the interrupted state")
-	}
-
-	// Relative, so nothing that reads it can be sent off the volume by
-	// following an absolute path. At the volume root, which is the one
-	// directory the sweep reads - not beside the destination, wherever the
-	// caller happened to keep it.
-	//
-	// The identity is of what was being PUBLISHED, which is still at the staging
-	// path here: the publish stopped before it could be moved.
-	want := "dest\n" + identityOf(t, staging) + "\n"
-	if got := read(t, displaced+markerSuffix); got != want {
-		t.Errorf("marker holds %q, want %q", got, want)
-	}
-}
-
-// The record has to name the object being placed, not the one being displaced -
-// the sweep compares it against whatever occupies the destination afterwards.
-func TestTheMarkerRecordsTheIdentityOfWhatIsBeingPublished(t *testing.T) {
-	root, staging, destination := interruptedPublish(t, "displaced")
-	displacedIdentity := identityOf(t, destination)
-
-	if err := publish(staging, destination, root, testID); err == nil {
-		t.Fatal("a publish that could not complete reported success")
-	}
-
-	marker := read(t, filepath.Join(root, swapPrefix+testID)+markerSuffix)
-	if want := "dest\n" + identityOf(t, staging) + "\n"; marker != want {
-		t.Errorf("marker holds %q, want the identity of the published object %q", marker, want)
-	}
-	if marker == "dest\n"+displacedIdentity+"\n" {
-		t.Error("marker records the displaced entry rather than what is being published")
-	}
-}
-
 // Nothing is displaced over an operation that cannot be carried out, so there is
 // nothing for a sweep to put back afterwards.
 func TestAMissingStagingPathFailsBeforeAnythingMoves(t *testing.T) {
@@ -268,43 +207,6 @@ func TestAMissingStagingPathFailsBeforeAnythingMoves(t *testing.T) {
 	entries, _ := os.ReadDir(root)
 	if len(entries) != 1 {
 		t.Errorf("volume holds %d entries, want only the untouched destination: %v", len(entries), entries)
-	}
-}
-
-func TestMarkerContentsAreRelativeToTheVolumeRoot(t *testing.T) {
-	cases := []struct{ root, destination, want string }{
-		{"/work", "/work/photos", "photos"},
-		{"/work", "/work/a/b/c", "a/b/c"},
-		{"/work/", "/work/photos", "photos"},
-	}
-	for _, testCase := range cases {
-		got, err := markerContents(testCase.destination, testCase.root)
-		if err != nil {
-			t.Errorf("markerContents(%q, %q): %v", testCase.destination, testCase.root, err)
-			continue
-		}
-		if got != testCase.want {
-			t.Errorf("markerContents(%q, %q) = %q, want %q",
-				testCase.destination, testCase.root, got, testCase.want)
-		}
-	}
-}
-
-// The shape that cannot be abused is the one that cannot be written down, and
-// that only holds if a destination outside the root is REFUSED. Trimming a
-// prefix that is not there leaves the absolute path, which is what a reader
-// would then be handed - and which the whole relative form exists to prevent.
-func TestMarkerContentsRefuseADestinationOutsideTheRoot(t *testing.T) {
-	cases := []struct{ root, destination string }{
-		{"/work", "/etc/cron.d/payload"},
-		{"/work", "/workshop/photos"},
-		{"/work", "photos"},
-	}
-	for _, testCase := range cases {
-		if got, err := markerContents(testCase.destination, testCase.root); err == nil {
-			t.Errorf("markerContents(%q, %q) = %q, want a refusal",
-				testCase.destination, testCase.root, got)
-		}
 	}
 }
 
@@ -334,13 +236,13 @@ func TestPublishRefusesOperandsThatContainOneAnother(t *testing.T) {
 		if got := read(t, staging); got != "precious" {
 			t.Errorf("staging holds %q", got)
 		}
-		if _, err := os.Lstat(filepath.Join(root, swapPrefix+testID)); !os.IsNotExist(err) {
+		if _, err := os.Lstat(destination); err != nil {
 			t.Error("something was displaced by an operation that was refused")
 		}
 	})
 
-	// The mirror. rename(2) cannot move a directory into its own subtree at all,
-	// so this one also stops after displacing the destination.
+	// The mirror. rename(2) cannot move a directory into its own subtree at
+	// all, so this one could not have worked either.
 	t.Run("staging contains destination", func(t *testing.T) {
 		root := t.TempDir()
 		staging := filepath.Join(root, "photos")
@@ -350,7 +252,7 @@ func TestPublishRefusesOperandsThatContainOneAnother(t *testing.T) {
 		if err := publish(staging, destination, root, testID); err == nil {
 			t.Fatal("publishing a directory into its own subtree succeeded")
 		}
-		if _, err := os.Lstat(filepath.Join(root, swapPrefix+testID)); !os.IsNotExist(err) {
+		if _, err := os.Lstat(destination); err != nil {
 			t.Error("something was displaced by an operation that was refused")
 		}
 	})
@@ -371,36 +273,100 @@ func TestPublishRefusesOperandsThatContainOneAnother(t *testing.T) {
 	})
 }
 
-// The marker names a path derived from --id, and it is written into a directory
-// the application can also write to. A link planted there would be followed, so
-// the record of where the caller's data belongs would be written wherever the
-// link pointed - and the sweep would then find no marker beside the displaced
-// copy and delete it as a duplicate.
+// The property the whole recovery scheme used to exist to survive, now stated
+// directly: at NO point is the destination absent.
 //
-// Not reachable today, because --id is a fresh randomUUID the application never
-// learns. Refused anyway: this program should not depend on its caller having
-// picked an unguessable name for a file it writes as root.
-func TestTheMarkerIsNotWrittenThroughAPlantedLink(t *testing.T) {
+// The old publish was two renames, and between them the caller's data sat under
+// a name their file browser hides while their own path was empty. Everything
+// downstream - the marker, the recorded identity, the boot sweep reading a file
+// the application can write to - was there to get out of that state. An
+// exchange has no such state to get out of.
+func TestPublishNeverLeavesTheDestinationAbsent(t *testing.T) {
 	root := t.TempDir()
-	staging := filepath.Join(root, "staged")
+	staging := filepath.Join(root, ".flux-op-"+testID)
 	destination := filepath.Join(root, "dest")
-	write(t, staging, "the object being published")
-	write(t, destination, "displaced")
+	write(t, filepath.Join(staging, "new.txt"), "the result")
+	write(t, filepath.Join(destination, "mine.txt"), "the caller's")
 
-	elsewhere := filepath.Join(root, "elsewhere")
-	write(t, elsewhere, "SOMETHING THE CALLER OWNS")
-	if err := os.Symlink(elsewhere, filepath.Join(root, swapPrefix+testID)+markerSuffix); err != nil {
+	// Watched from another goroutine while the publish runs. A window of the
+	// kind the two renames opened would be seen as an absent destination.
+	stop := make(chan struct{})
+	absent := make(chan bool, 1)
+	go func() {
+		sawAbsent := false
+		for {
+			select {
+			case <-stop:
+				absent <- sawAbsent
+				return
+			default:
+				if _, err := os.Lstat(destination); os.IsNotExist(err) {
+					sawAbsent = true
+				}
+			}
+		}
+	}()
+
+	if err := publish(staging, destination, root, testID); err != nil {
+		t.Fatal(err)
+	}
+	close(stop)
+
+	if <-absent {
+		t.Error("the destination was absent at some point during the publish")
+	}
+	if got := read(t, filepath.Join(destination, "new.txt")); got != "the result" {
+		t.Errorf("destination holds %q, want the result", got)
+	}
+}
+
+// What a crash between the exchange and the cleanup leaves, and why the sweep
+// needs no marker to decide about it.
+//
+// Both reachable states put something complete at the destination and something
+// disposable under the staging name, so recovery is not a judgement: delete the
+// staging entry, which is what the sweep already does with one.
+func TestTheOldDataIsLeftUnderTheStagingNameForTheSweep(t *testing.T) {
+	root := t.TempDir()
+	staging := filepath.Join(root, ".flux-op-"+testID)
+	destination := filepath.Join(root, "dest")
+	write(t, filepath.Join(staging, "new.txt"), "the result")
+	write(t, filepath.Join(destination, "mine.txt"), "the caller's")
+
+	// The exchange alone, which is the state a crash before the cleanup leaves.
+	if err := exchange(staging, destination); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := publish(staging, destination, root, testID); err == nil {
-		t.Fatal("publishing through a planted marker link succeeded")
+	if got := read(t, filepath.Join(destination, "new.txt")); got != "the result" {
+		t.Errorf("destination holds %q, want the result", got)
 	}
-	if got := read(t, elsewhere); got != "SOMETHING THE CALLER OWNS" {
-		t.Errorf("the link target was written through, and now holds %q", got)
+	if got := read(t, filepath.Join(staging, "mine.txt")); got != "the caller's" {
+		t.Errorf("staging holds %q, want the caller's superseded data", got)
 	}
-	// Refused before the swap, so the caller still has what they had.
-	if got := read(t, destination); got != "displaced" {
-		t.Errorf("the destination holds %q", got)
+}
+
+// Nothing is written beside the operands. The marker was a file in a directory
+// the application can write to, and reading it on the boot sweep was the root
+// of two separate findings; a publish that records nothing cannot be read.
+func TestPublishWritesNoMarkerBesideTheOperands(t *testing.T) {
+	root := t.TempDir()
+	staging := filepath.Join(root, ".flux-op-"+testID)
+	destination := filepath.Join(root, "dest")
+	write(t, filepath.Join(staging, "new.txt"), "the result")
+	write(t, filepath.Join(destination, "mine.txt"), "the caller's")
+
+	if err := publish(staging, destination, root, testID); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Name() != "dest" {
+			t.Errorf("publish left %q behind", entry.Name())
+		}
 	}
 }

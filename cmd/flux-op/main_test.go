@@ -275,10 +275,12 @@ func TestAPublishThatIsRefusedFailsTheOperation(t *testing.T) {
 	}
 }
 
-// The destination is inside the volume by construction, so a marker that cannot
-// be written relative to the root means something upstream is wrong - and the
-// operation stops rather than publishing with no record of what it displaced.
-func TestAPublishStopsWhenWhereItBelongsCannotBeRecorded(t *testing.T) {
+// The destination is inside the volume by construction, so one that is not
+// means something upstream is wrong and the operation stops rather than acting
+// on it. This used to fall out of writing the marker, whose contents were the
+// destination relative to the root; it is its own check now, because a guard
+// riding on something else disappears when that something else does.
+func TestAPublishRefusesAnOperandOutsideTheVolume(t *testing.T) {
 	v := newVolume(t)
 	outside := filepath.Join(t.TempDir(), "dest")
 	write(t, v.staging, "the object being published")

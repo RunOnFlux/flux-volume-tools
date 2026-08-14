@@ -308,29 +308,6 @@ func run(argv []string) int {
 	return 0
 }
 
-// markerContents records where a displaced entry belongs, relative to the volume
-// root.
-//
-// This file sits in a directory the app owner can write to, so its contents are
-// input rather than state: an absolute path in here is a path a privileged
-// reader might follow off the volume, and the shape that cannot be abused is the
-// one that cannot be written down. Traversal still has to be refused by whoever
-// reads it - ".." is expressible in a relative path too - but the class does not
-// need checking for if it cannot be represented.
-func markerContents(destination, root string) (string, error) {
-	base := strings.TrimSuffix(filepath.Clean(root), string(filepath.Separator))
-	cleaned := filepath.Clean(destination)
-
-	relative := strings.TrimPrefix(cleaned, base+string(filepath.Separator))
-	// Unchanged means the prefix was not there. Trimming a prefix that is absent
-	// is a no-op, so without this the absolute path is what gets written down -
-	// which is the one shape this function exists to make unrepresentable.
-	if relative == cleaned || relative == "" {
-		return "", fmt.Errorf("%s is not inside %s, so where it belongs cannot be recorded", destination, root)
-	}
-	return relative, nil
-}
-
 // volumeRoot normalises the volume root, and reports whether it is one.
 //
 // Absolute, because everything here is built by joining onto it and a relative

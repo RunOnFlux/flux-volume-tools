@@ -102,7 +102,7 @@ func TestAStreamedUploadTakesNoCommand(t *testing.T) {
 	if result.exit != 2 {
 		t.Fatalf("exit %d, want 2:\n%s", result.exit, result.output)
 	}
-	if exists(volume, "dest") {
+	if exists(t, volume, "dest") {
 		t.Error("a refused invocation published something")
 	}
 }
@@ -139,7 +139,7 @@ func TestAnEmptyUploadIsAnEmptyFile(t *testing.T) {
 	if result.exit != 0 {
 		t.Fatalf("exit %d:\n%s", result.exit, result.output)
 	}
-	if !exists(volume, "dest") {
+	if !exists(t, volume, "dest") {
 		t.Error("an empty upload produced no file at all")
 	}
 	if got := contents(t, volume, "dest"); got != "" {
@@ -187,9 +187,9 @@ func TestACancelledUploadStopsAndReclaimsStaging(t *testing.T) {
 	// Under way before it is stopped, so the stop cannot land on an operation
 	// that has not started.
 	deadline := time.Now().Add(30 * time.Second)
-	for !exists(volume, ".flux-op-"+operationID) {
+	for !exists(t, volume, ".flux-op-"+operationID) {
 		if time.Now().After(deadline) {
-			t.Fatalf("the upload never created its staging file\n%s", tree(volume))
+			t.Fatalf("the upload never created its staging file\n%s", tree(t, volume))
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
