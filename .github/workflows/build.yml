@@ -215,10 +215,14 @@ jobs:
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf "${IMAGE}@sha256:%s " *)
 
-      # Everything FluxOS has to write down, in one place. The pin is a tag AND
-      # a per-architecture image id, and the id is the digest of the image's own
-      # CONFIG rather than of its manifest - so the manifest list digest alone,
-      # which is what this job used to print, is not enough to fill it in.
+      # Everything FluxOS has to write down, in one place. The pin is a tag and
+      # TWO kinds of identifier, because docker files an image under different
+      # content digests depending on how it stores images: the classic store
+      # under the per-architecture image's own CONFIG digest, the containerd
+      # store - the default from Docker 29 - under the digest of the INDEX
+      # covering every architecture. A node accepts either, so both are printed;
+      # printing only one left 92% of the fleet refusing an image it had just
+      # pulled, since no retry makes two different numbers agree.
       - name: Write the pin to the run summary
         run: |
           reference="${IMAGE}:${{ steps.meta.outputs.version }}"
@@ -227,9 +231,11 @@ jobs:
             echo
             echo 'ZelBack/config/volumeToolsImage.json:'
             echo
+            index="$(docker buildx imagetools inspect "$reference" --raw | sha256sum | cut -d' ' -f1)"
             echo '```json'
             echo '{'
             echo "  \"image\": \"${reference}\","
+            echo "  \"indexId\": \"sha256:${index}\","
             echo '  "imageIds": {'
             for arch in amd64 arm64; do
               manifest="$(docker buildx imagetools inspect "$reference" --raw |
