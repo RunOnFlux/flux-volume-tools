@@ -17,6 +17,14 @@ var errDestinationExists = errors.New("the destination already exists")
 // it now instead of leaving it on the volume for the next boot sweep.
 var errNothingMoved = errors.New("refused before anything moved")
 
+// A publish refused because the only way to carry it out was to delete data the
+// request never named - a file put where a directory is, an entry moved onto
+// itself under another name. Nothing has moved, so staging is still reclaimed;
+// but this is the caller's own request rather than a limit, so it reports its own
+// exit status, which a dashboard turns into a specific answer rather than a
+// generic failure.
+var errWouldDestroy = errors.New("refused to avoid deleting data the caller did not name")
+
 // publish moves the result into place.
 //
 // A destination that does not exist is one atomic rename and nothing to clean
@@ -57,7 +65,7 @@ var errNothingMoved = errors.New("refused before anything moved")
 // renaming afterwards decides on a state that may have changed by the time the
 // rename runs, and the caller a create-folder or a rename answers is entitled to
 // "it exists" meaning it existed at the instant nothing was written.
-func publish(staging, destination, root, id string, noReplace bool) error {
+func publish(staging, destination, root, id string, noReplace, merge bool) error {
 	// Neither operand may contain the other, decided before anything moves.
 	//
 	// Displacing the destination takes everything under it, so a destination
@@ -93,7 +101,8 @@ func publish(staging, destination, root, id string, noReplace bool) error {
 
 	// A staging path that is not there fails here, before the destination is
 	// touched at all.
-	if _, err := os.Lstat(staging); err != nil {
+	stagingInfo, err := os.Lstat(staging)
+	if err != nil {
 		return fmt.Errorf("%w: %w", errNothingMoved, err)
 	}
 
@@ -109,22 +118,167 @@ func publish(staging, destination, root, id string, noReplace bool) error {
 	// Lstat, not Stat: a dangling symlink at the destination is an entry that
 	// has to be replaced, and a check that followed it would treat the
 	// destination as empty and rename over the link.
-	if _, err := os.Lstat(destination); err != nil {
+	dstInfo, err := os.Lstat(destination)
+	if err != nil {
 		if !os.IsNotExist(err) {
 			return err
 		}
+		// Nothing at the name: one atomic rename, and no kind to reconcile.
 		return os.Rename(staging, destination)
 	}
 
-	if err := exchange(staging, destination); err != nil {
-		return err
+	// The destination exists, so how the collision is resolved is decided from
+	// what the two operands ARE:
+	//
+	//   the same entry under two names   refused. An app can point a symlink
+	//                                    inside its own volume at another entry,
+	//                                    so two different paths can name one
+	//                                    file. Exchanging an entry with itself
+	//                                    moves nothing, and the cleanup a normal
+	//                                    exchange does next would then delete the
+	//                                    caller's only copy. Compared by inode,
+	//                                    the one comparison a spelling cannot fool.
+	//
+	//   a file over a file               replaced, in one atomic exchange.
+	//
+	//   a directory over a directory     merged when the caller asks for it, and
+	//                                    otherwise refused. Replacing a directory
+	//                                    wholesale deletes every entry the caller
+	//                                    did not name but that sat beside one they
+	//                                    did - the outcome this program exists to
+	//                                    prevent - so it is never the default. A
+	//                                    merge overlays the source onto the
+	//                                    destination and keeps what neither names.
+	//
+	//   a file over a directory, or a    refused. A single file cannot stand in
+	//   directory over a file            for a tree, and standing it there would
+	//                                    delete the tree. mv -T and cp -T refuse
+	//                                    this for the same reason.
+	if os.SameFile(stagingInfo, dstInfo) {
+		return fmt.Errorf("%w: %s and %s are the same entry", errWouldDestroy, staging, destination)
 	}
 
-	// The caller's previous data is now under the staging name, and the caller
-	// has what they asked for. Best effort from here: a staging entry left
-	// behind is exactly what the startup sweep reclaims, and failing the
+	stagingIsDir := stagingInfo.IsDir()
+	dstIsDir := dstInfo.IsDir()
+
+	switch {
+	case stagingIsDir && dstIsDir:
+		if !merge {
+			return fmt.Errorf("%w: %s is a directory, and replacing it would delete everything in it that %s does not, which a merge was not requested to allow", errWouldDestroy, destination, staging)
+		}
+		// Refused as a whole before anything moves where the two trees disagree
+		// on a name's KIND. Overlaying regardless would delete a tree to seat a
+		// file one level down, which is the same loss this refuses at the top.
+		if err := checkMergeable(staging, destination); err != nil {
+			return err
+		}
+		if err := mergeInto(staging, destination); err != nil {
+			return err
+		}
+	case stagingIsDir != dstIsDir:
+		return fmt.Errorf("%w: %s and %s are not the same kind of entry, so replacing one with the other would delete it", errWouldDestroy, staging, destination)
+	default:
+		if err := exchange(staging, destination); err != nil {
+			return err
+		}
+	}
+
+	// The caller's previous data is now under the staging name (an exchange), or
+	// the staging tree has been emptied into the destination (a merge). Either
+	// way the staging entry is disposable. Best effort from here: a staging entry
+	// left behind is exactly what the startup sweep reclaims, and failing the
 	// operation over it would report a success as a failure.
 	os.RemoveAll(staging)
+	return nil
+}
+
+// checkMergeable reports whether staging can be overlaid onto destination
+// without a kind collision, decided before anything moves.
+//
+// Two entries that share a name but not a KIND - a file in one tree where the
+// other keeps a directory - cannot both survive an overlay: seating the file
+// deletes the directory, which is the loss a merge is meant to avoid. Found here,
+// the whole publish is refused with nothing moved rather than left half done.
+// Two directories are recursed into; two non-directories are a plain overwrite,
+// which is what the caller asked for by merging into an occupied name.
+func checkMergeable(staging, destination string) error {
+	entries, err := os.ReadDir(staging)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		src := filepath.Join(staging, entry.Name())
+		dst := filepath.Join(destination, entry.Name())
+		dstInfo, err := os.Lstat(dst)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue // no entry to collide with; it moves straight in
+			}
+			return err
+		}
+		srcInfo, err := os.Lstat(src)
+		if err != nil {
+			return err
+		}
+		srcIsDir := srcInfo.IsDir()
+		dstIsDir := dstInfo.IsDir()
+		switch {
+		case srcIsDir && dstIsDir:
+			if err := checkMergeable(src, dst); err != nil {
+				return err
+			}
+		case srcIsDir != dstIsDir:
+			return fmt.Errorf("%w: %s and %s are not the same kind of entry, so merging would delete one", errWouldDestroy, src, dst)
+		}
+	}
+	return nil
+}
+
+// mergeInto overlays staging onto destination, entry by entry.
+//
+// A name the destination does not hold is moved straight in. Two directories are
+// merged recursively, so what the destination already keeps under a shared
+// directory name stays rather than being replaced with the source's whole
+// version of that directory. Two non-directories are replaced - checkMergeable
+// has already established no name collides across kinds, so a rename here only
+// ever replaces like with like.
+//
+// Not atomic: it is a sequence of renames, so an interruption can leave the
+// overlay part done. That is inherent to merging - every tool that overlays one
+// tree onto another has it - and it is the trade a caller accepts by merging
+// into a directory that already has contents rather than replacing it.
+func mergeInto(staging, destination string) error {
+	entries, err := os.ReadDir(staging)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		src := filepath.Join(staging, entry.Name())
+		dst := filepath.Join(destination, entry.Name())
+		dstInfo, err := os.Lstat(dst)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return err
+			}
+			if err := os.Rename(src, dst); err != nil {
+				return err
+			}
+			continue
+		}
+		srcInfo, err := os.Lstat(src)
+		if err != nil {
+			return err
+		}
+		if srcInfo.IsDir() && dstInfo.IsDir() {
+			if err := mergeInto(src, dst); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.Rename(src, dst); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

@@ -34,7 +34,7 @@ func TestPublishToANewDestination(t *testing.T) {
 	destination := filepath.Join(root, "dest")
 	write(t, staging, "new")
 
-	if err := publish(staging, destination, root, testID, false); err != nil {
+	if err := publish(staging, destination, root, testID, false, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -52,78 +52,113 @@ func TestPublishToANewDestination(t *testing.T) {
 // a directory at all, so every combination goes through the same swap rather
 // than branching on type - the branch is where the file-replaced-by-directory
 // case was originally missed.
-func TestPublishReplacesEveryCombinationOfTypes(t *testing.T) {
-	cases := []struct {
-		name          string
-		makeStaging   func(t *testing.T, path string)
-		makeExisting  func(t *testing.T, path string)
-		expectAtDest  string
-		expectMissing string
-	}{
-		{
-			name:         "a file replaces a file",
-			makeStaging:  func(t *testing.T, p string) { write(t, p, "new") },
-			makeExisting: func(t *testing.T, p string) { write(t, p, "old") },
-			expectAtDest: "new",
-		},
-		{
-			name:         "a directory replaces a file",
-			makeStaging:  func(t *testing.T, p string) { write(t, filepath.Join(p, "f"), "new") },
-			makeExisting: func(t *testing.T, p string) { write(t, p, "old") },
-			expectAtDest: "f",
-		},
-		{
-			name:         "a file replaces a directory",
-			makeStaging:  func(t *testing.T, p string) { write(t, p, "new") },
-			makeExisting: func(t *testing.T, p string) { write(t, filepath.Join(p, "keep"), "old") },
-			expectAtDest: "new",
-		},
-		{
-			name:          "a directory replaces a directory without merging into it",
-			makeStaging:   func(t *testing.T, p string) { write(t, filepath.Join(p, "f"), "new") },
-			makeExisting:  func(t *testing.T, p string) { write(t, filepath.Join(p, "keep"), "old") },
-			expectAtDest:  "f",
-			expectMissing: "keep",
-		},
+func TestPublishResolvesCollisionsByKind(t *testing.T) {
+	fileStaging := func(t *testing.T, p string) { write(t, p, "new") }
+	fileExisting := func(t *testing.T, p string) { write(t, p, "old") }
+	dirStaging := func(t *testing.T, p string) { write(t, filepath.Join(p, "f"), "new") }
+	dirExisting := func(t *testing.T, p string) { write(t, filepath.Join(p, "keep"), "old") }
+
+	setup := func(t *testing.T) (string, string, string) {
+		root := t.TempDir()
+		return root, filepath.Join(root, ".flux-op-"+testID), filepath.Join(root, "dest")
 	}
 
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			root := t.TempDir()
-			staging := filepath.Join(root, ".flux-op-"+testID)
-			destination := filepath.Join(root, "dest")
-			testCase.makeStaging(t, staging)
-			testCase.makeExisting(t, destination)
+	t.Run("a file replaces a file", func(t *testing.T) {
+		root, staging, destination := setup(t)
+		fileStaging(t, staging)
+		fileExisting(t, destination)
+		if err := publish(staging, destination, root, testID, false, false); err != nil {
+			t.Fatal(err)
+		}
+		if got := read(t, destination); got != "new" {
+			t.Errorf("destination holds %q, want the replacement", got)
+		}
+		if _, err := os.Lstat(staging); err == nil {
+			t.Error("the staging entry was left behind")
+		}
+	})
 
-			if err := publish(staging, destination, root, testID, false); err != nil {
-				t.Fatal(err)
-			}
+	t.Run("a directory may not replace a file", func(t *testing.T) {
+		root, staging, destination := setup(t)
+		dirStaging(t, staging)
+		fileExisting(t, destination)
+		if err := publish(staging, destination, root, testID, false, false); err == nil {
+			t.Fatal("a directory replaced a file rather than being refused")
+		}
+		if got := read(t, destination); got != "old" {
+			t.Errorf("the destination file was disturbed: %q", got)
+		}
+		if _, err := os.Lstat(staging); err != nil {
+			t.Error("staging was deleted on a refusal, before its owner could reclaim it")
+		}
+	})
 
-			info, err := os.Lstat(destination)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if info.IsDir() {
-				if _, err := os.Stat(filepath.Join(destination, testCase.expectAtDest)); err != nil {
-					t.Errorf("expected %s inside the destination", testCase.expectAtDest)
-				}
-				if testCase.expectMissing != "" {
-					if _, err := os.Stat(filepath.Join(destination, testCase.expectMissing)); err == nil {
-						t.Errorf("%s survived - the destination was merged into, not replaced", testCase.expectMissing)
-					}
-				}
-			} else if got := read(t, destination); got != testCase.expectAtDest {
-				t.Errorf("destination holds %q, want %q", got, testCase.expectAtDest)
-			}
+	t.Run("a file may not replace a directory", func(t *testing.T) {
+		root, staging, destination := setup(t)
+		fileStaging(t, staging)
+		dirExisting(t, destination)
+		if err := publish(staging, destination, root, testID, false, false); err == nil {
+			t.Fatal("a file replaced a directory rather than being refused")
+		}
+		if _, err := os.Stat(filepath.Join(destination, "keep")); err != nil {
+			t.Error("the destination directory was deleted by a file")
+		}
+		if _, err := os.Lstat(staging); err != nil {
+			t.Error("staging was deleted on a refusal, before its owner could reclaim it")
+		}
+	})
 
-			// A completed publish leaves the staging name empty. The old
-			// data is under it between the exchange and the cleanup, and
-			// the cleanup is the last thing publish does.
-			if _, err := os.Lstat(staging); err == nil {
-				t.Error("the staging entry was left behind")
-			}
-		})
-	}
+	t.Run("a directory is not replaced wholesale without a merge", func(t *testing.T) {
+		root, staging, destination := setup(t)
+		dirStaging(t, staging)
+		dirExisting(t, destination)
+		if err := publish(staging, destination, root, testID, false, false); err == nil {
+			t.Fatal("a directory was replaced wholesale without a merge being asked for")
+		}
+		if _, err := os.Stat(filepath.Join(destination, "keep")); err != nil {
+			t.Error("the destination's own contents were deleted")
+		}
+		if _, err := os.Lstat(staging); err != nil {
+			t.Error("staging was deleted on a refusal, before its owner could reclaim it")
+		}
+	})
+
+	t.Run("a directory merges into a directory", func(t *testing.T) {
+		root, staging, destination := setup(t)
+		write(t, filepath.Join(staging, "added"), "new")
+		write(t, filepath.Join(staging, "shared"), "fromsource")
+		write(t, filepath.Join(destination, "kept"), "old")
+		write(t, filepath.Join(destination, "shared"), "fromdest")
+
+		if err := publish(staging, destination, root, testID, false, true); err != nil {
+			t.Fatal(err)
+		}
+		if got := read(t, filepath.Join(destination, "kept")); got != "old" {
+			t.Errorf("kept holds %q - the merge did not preserve what the source did not name", got)
+		}
+		if got := read(t, filepath.Join(destination, "added")); got != "new" {
+			t.Errorf("added holds %q - the merge did not bring in the new entry", got)
+		}
+		if got := read(t, filepath.Join(destination, "shared")); got != "fromsource" {
+			t.Errorf("shared holds %q - a name in both was not overwritten by the source", got)
+		}
+		if _, err := os.Lstat(staging); err == nil {
+			t.Error("the emptied staging tree was left behind")
+		}
+	})
+
+	t.Run("a merge is refused whole when a name collides across kinds", func(t *testing.T) {
+		root, staging, destination := setup(t)
+		write(t, filepath.Join(staging, "sub"), "a file in the source")
+		write(t, filepath.Join(destination, "sub", "inside"), "a directory in the destination")
+
+		if err := publish(staging, destination, root, testID, false, true); err == nil {
+			t.Fatal("a cross-kind collision was merged rather than refused")
+		}
+		if got := read(t, filepath.Join(destination, "sub", "inside")); got != "a directory in the destination" {
+			t.Errorf("the destination's sub/inside was disturbed: %q", got)
+		}
+	})
 }
 
 // A dangling symlink is an entry, and has to be moved aside like any other. A
@@ -137,7 +172,7 @@ func TestPublishTreatsADanglingSymlinkAsAnExistingEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := publish(staging, destination, root, testID, false); err != nil {
+	if err := publish(staging, destination, root, testID, false, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -198,7 +233,7 @@ func TestAMissingStagingPathFailsBeforeAnythingMoves(t *testing.T) {
 	destination := filepath.Join(root, "dest")
 	write(t, destination, "precious")
 
-	if err := publish(staging, destination, root, testID, false); err == nil {
+	if err := publish(staging, destination, root, testID, false, false); err == nil {
 		t.Fatal("publishing a staging path that does not exist succeeded")
 	}
 
@@ -225,7 +260,7 @@ func TestPublishRefusesOperandsThatContainOneAnother(t *testing.T) {
 		write(t, staging, "precious")
 		write(t, filepath.Join(destination, "wedding.jpg"), "irreplaceable")
 
-		if err := publish(staging, destination, root, testID, false); err == nil {
+		if err := publish(staging, destination, root, testID, false, false); err == nil {
 			t.Fatal("publishing a directory over its own parent succeeded")
 		}
 
@@ -250,7 +285,7 @@ func TestPublishRefusesOperandsThatContainOneAnother(t *testing.T) {
 		destination := filepath.Join(staging, "2024")
 		write(t, destination, "precious")
 
-		if err := publish(staging, destination, root, testID, false); err == nil {
+		if err := publish(staging, destination, root, testID, false, false); err == nil {
 			t.Fatal("publishing a directory into its own subtree succeeded")
 		}
 		if _, err := os.Lstat(destination); err != nil {
@@ -265,7 +300,7 @@ func TestPublishRefusesOperandsThatContainOneAnother(t *testing.T) {
 		same := filepath.Join(root, "photos")
 		write(t, same, "precious")
 
-		if err := publish(same, same, root, testID, false); err == nil {
+		if err := publish(same, same, root, testID, false, false); err == nil {
 			t.Fatal("publishing an entry over itself succeeded")
 		}
 		if got := read(t, same); got != "precious" {
@@ -286,8 +321,8 @@ func TestPublishNeverLeavesTheDestinationAbsent(t *testing.T) {
 	root := t.TempDir()
 	staging := filepath.Join(root, ".flux-op-"+testID)
 	destination := filepath.Join(root, "dest")
-	write(t, filepath.Join(staging, "new.txt"), "the result")
-	write(t, filepath.Join(destination, "mine.txt"), "the caller's")
+	write(t, staging, "the result")
+	write(t, destination, "the caller's")
 
 	// Watched from another goroutine while the publish runs. A window of the
 	// kind the two renames opened would be seen as an absent destination.
@@ -308,7 +343,7 @@ func TestPublishNeverLeavesTheDestinationAbsent(t *testing.T) {
 		}
 	}()
 
-	if err := publish(staging, destination, root, testID, false); err != nil {
+	if err := publish(staging, destination, root, testID, false, false); err != nil {
 		t.Fatal(err)
 	}
 	close(stop)
@@ -316,7 +351,7 @@ func TestPublishNeverLeavesTheDestinationAbsent(t *testing.T) {
 	if <-absent {
 		t.Error("the destination was absent at some point during the publish")
 	}
-	if got := read(t, filepath.Join(destination, "new.txt")); got != "the result" {
+	if got := read(t, destination); got != "the result" {
 		t.Errorf("destination holds %q, want the result", got)
 	}
 }
@@ -354,10 +389,10 @@ func TestPublishWritesNoMarkerBesideTheOperands(t *testing.T) {
 	root := t.TempDir()
 	staging := filepath.Join(root, ".flux-op-"+testID)
 	destination := filepath.Join(root, "dest")
-	write(t, filepath.Join(staging, "new.txt"), "the result")
-	write(t, filepath.Join(destination, "mine.txt"), "the caller's")
+	write(t, staging, "the result")
+	write(t, destination, "the caller's")
 
-	if err := publish(staging, destination, root, testID, false); err != nil {
+	if err := publish(staging, destination, root, testID, false, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -399,7 +434,7 @@ func TestPublishRefusesAnOccupiedDestinationWhenAskedNot(t *testing.T) {
 			write(t, staging, "the result")
 			occupy(t, destination)
 
-			err := publish(staging, destination, root, testID, true)
+			err := publish(staging, destination, root, testID, true, false)
 			if !errors.Is(err, errDestinationExists) {
 				t.Fatalf("publishing onto %s gave %v, want a refusal the caller can tell apart", name, err)
 			}
@@ -423,7 +458,7 @@ func TestPublishTakesAFreeNameWhenAskedNotToReplace(t *testing.T) {
 	destination := filepath.Join(root, "dest")
 	write(t, staging, "the result")
 
-	if err := publish(staging, destination, root, testID, true); err != nil {
+	if err := publish(staging, destination, root, testID, true, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -445,11 +480,37 @@ func TestPublishStillReplacesWithoutTheFlag(t *testing.T) {
 	write(t, staging, "the result")
 	write(t, destination, "superseded")
 
-	if err := publish(staging, destination, root, testID, false); err != nil {
+	if err := publish(staging, destination, root, testID, false, false); err != nil {
 		t.Fatal(err)
 	}
 
 	if got := read(t, destination); got != "the result" {
 		t.Errorf("destination holds %q, want the result", got)
+	}
+}
+
+// Two different paths that resolve to one file, made so by a symlink the app
+// placed inside its own volume. The lexical checks upstream see two distinct
+// strings and pass them; a plain exchange would move nothing, and the cleanup a
+// normal exchange does next would then delete the file. Refused here, by inode.
+func TestPublishRefusesTwoNamesForTheSameEntry(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "photos")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(real, "a.jpg"), "precious")
+	// pics -> photos, so pics/a.jpg and photos/a.jpg are one file under two names.
+	if err := os.Symlink(real, filepath.Join(root, "pics")); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(root, "pics", "a.jpg")
+	destination := filepath.Join(root, "photos", "a.jpg")
+
+	if err := publish(source, destination, root, testID, false, false); err == nil {
+		t.Fatal("moving a file onto itself under another name succeeded")
+	}
+	if got := read(t, destination); got != "precious" {
+		t.Errorf("the file holds %q - it was not left intact", got)
 	}
 }
