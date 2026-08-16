@@ -41,15 +41,27 @@ var ephemeralFilesystems = map[string]bool{
 func TestOnlyTheAppVolumeIsWritable(t *testing.T) {
 	volume := volumeDir(t)
 
-	mounts := inContainer(t, volume, "", `cat /proc/mounts`)
+	// Bracketed, because docker writes to this stream too: on a runner whose
+	// architecture differs from the image's it prints a platform warning, and a
+	// sentence has enough words in it to be read as a mount line by anything
+	// splitting on whitespace. It was, and the test failed naming "requested" as
+	// a filesystem.
+	mounts := inContainer(t, volume, "", `echo MOUNTS-BEGIN; cat /proc/mounts; echo MOUNTS-END`)
 	if mounts.exit != 0 {
 		t.Fatalf("could not read the mount table:\n%s", mounts.output)
 	}
+	_, after, found := strings.Cut(mounts.output, "MOUNTS-BEGIN\n")
+	table, _, closed := strings.Cut(after, "MOUNTS-END")
+	if !found || !closed {
+		t.Fatalf("the mount table did not arrive whole:\n%s", mounts.output)
+	}
 
 	writable := []string{}
-	for _, line := range strings.Split(mounts.output, "\n") {
+	for _, line := range strings.Split(table, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 4 {
+		// Six fields exactly, and a mount point that is an absolute path. A line
+		// of prose satisfies neither.
+		if len(fields) != 6 || !strings.HasPrefix(fields[1], "/") {
 			continue
 		}
 		point, fstype, options := fields[1], fields[2], fields[3]
