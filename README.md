@@ -54,7 +54,7 @@ an unprivileged system user is meant to remove.
 
 ```
 flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] [--max-bytes N] [--ordinary-only] \
-        <staging> <destination> -- [command [args...]]
+        [--no-replace] <staging> <destination> -- [command [args...]]
 ```
 
 The command writes into `<staging>`, never into `<destination>`. Only on success
@@ -63,7 +63,26 @@ and a node that loses power all leave `<destination>` exactly as it was.
 
 **The command may be empty**, and that is how a move and a rename are expressed:
 the caller's source already *is* the result, so publishing it is the whole
-operation.
+operation. With `--mkdir` and no command, creating a folder is the same shape:
+staging is made here and published under the name the caller asked for.
+
+**`--no-replace` publishes only onto a free name**, and exits **5** when the name
+is taken. Without it a publish replaces whatever is at the destination, which is
+what an upload and an overwriting move mean.
+
+The refusal is the rename's own — `RENAME_NOREPLACE`, the same call as the
+exchange below with the opposite flag — so it is not a look followed by a move.
+A caller that checked first would be answering for a moment that has passed: the
+application whose volume this is runs throughout and can take the name in
+between. Here the kernel compares and moves under the parent directory's lock, so
+"it already exists" is true of the instant nothing was written. It is also the
+only form that treats a file, an empty directory and a dangling symlink alike,
+each of which occupies the name.
+
+Exit **5** rather than a message, because the caller shows an app owner a
+different sentence for a name in use than for an operation that failed, and a
+status is the one part of a failure that does not depend on which tool inside
+this image produced it.
 
 `--id` and `--root` name what an interrupted publish leaves behind and where —
 `<root>/.flux-op-<id>`. Neither is derived from `<staging>`, because `<staging>`

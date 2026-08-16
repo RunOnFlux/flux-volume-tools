@@ -1,7 +1,8 @@
 // Command flux-op runs one file operation and publishes its result atomically.
 //
 //	flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] [--max-bytes N]
-//	        [--ordinary-only] [--from-stdin] <staging> <destination> -- [command [args...]]
+//	        [--ordinary-only] [--from-stdin] [--no-replace] <staging> <destination>
+//	        -- [command [args...]]
 //
 // --id and --root together decide where the artefacts of an interrupted publish
 // land and what they are called: <root>/.flux-old-<id> and its .dest marker.
@@ -46,9 +47,10 @@ var operationIdentifier = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{
 // Exit codes the caller distinguishes. Everything else is the command's own
 // status, passed through unchanged.
 const (
-	exitUsage       = 2
-	exitTooLarge    = 3
-	exitNotOrdinary = 4
+	exitUsage             = 2
+	exitTooLarge          = 3
+	exitNotOrdinary       = 4
+	exitDestinationExists = 5
 	// 128 + SIGTERM, which is what a shell reports for a signalled process and
 	// what FluxOS matches on to tell a cancelled operation from a failed one.
 	exitCanceled = 143
@@ -62,6 +64,7 @@ type options struct {
 	maxBytes       int64
 	ordinaryOnly   bool
 	fromStdin      bool
+	noReplace      bool
 
 	staging     string
 	destination string
@@ -69,7 +72,8 @@ type options struct {
 }
 
 const usage = "flux-op: usage: flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] " +
-	"[--max-bytes N] [--ordinary-only] [--from-stdin] <staging> <destination> -- [command [args...]]"
+	"[--max-bytes N] [--ordinary-only] [--from-stdin] [--no-replace] <staging> <destination> " +
+	"-- [command [args...]]"
 
 func main() {
 	// os.Exit skips deferred functions, so everything that has to run on the way
@@ -118,6 +122,12 @@ func parse(argv []string) (*options, error) {
 	// a short read: the transfer ends when the caller closes the stream, and the
 	// caller closes it only when it has sent everything.
 	flags.BoolVar(&opts.fromStdin, "from-stdin", false, "write this program's standard input into staging")
+	// Publish only onto a free name. Without it a publish REPLACES whatever is at
+	// the destination, which is what an upload or an overwriting move means; with
+	// it the operation is one a caller asked to be told about instead - creating a
+	// folder, renaming beside an existing entry. The refusal is the rename's own,
+	// so nothing is decided about a state that may since have changed.
+	flags.BoolVar(&opts.noReplace, "no-replace", false, "refuse rather than replace an occupied destination")
 
 	if err := flags.Parse(argv); err != nil {
 		return nil, errUsage
@@ -300,7 +310,15 @@ func run(argv []string) int {
 
 	reclaimStaging = false
 
-	if err := publish(opts.staging, opts.destination, opts.root, opts.id); err != nil {
+	if err := publish(opts.staging, opts.destination, opts.root, opts.id, opts.noReplace); err != nil {
+		// A refused name moved nothing, so staging is still this operation's own
+		// scratch rather than the caller's data under a new name. Re-arming the
+		// reclaim gives the volume its space back now instead of at the next boot.
+		if errors.Is(err, errDestinationExists) {
+			reclaimStaging = true
+			fmt.Fprintf(os.Stderr, "flux-op: %v\n", err)
+			return exitDestinationExists
+		}
 		fmt.Fprintf(os.Stderr, "flux-op: could not publish the result: %v\n", err)
 		return 1
 	}

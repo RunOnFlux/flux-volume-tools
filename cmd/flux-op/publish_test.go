@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -33,7 +34,7 @@ func TestPublishToANewDestination(t *testing.T) {
 	destination := filepath.Join(root, "dest")
 	write(t, staging, "new")
 
-	if err := publish(staging, destination, root, testID); err != nil {
+	if err := publish(staging, destination, root, testID, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -94,7 +95,7 @@ func TestPublishReplacesEveryCombinationOfTypes(t *testing.T) {
 			testCase.makeStaging(t, staging)
 			testCase.makeExisting(t, destination)
 
-			if err := publish(staging, destination, root, testID); err != nil {
+			if err := publish(staging, destination, root, testID, false); err != nil {
 				t.Fatal(err)
 			}
 
@@ -136,7 +137,7 @@ func TestPublishTreatsADanglingSymlinkAsAnExistingEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := publish(staging, destination, root, testID); err != nil {
+	if err := publish(staging, destination, root, testID, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -197,7 +198,7 @@ func TestAMissingStagingPathFailsBeforeAnythingMoves(t *testing.T) {
 	destination := filepath.Join(root, "dest")
 	write(t, destination, "precious")
 
-	if err := publish(staging, destination, root, testID); err == nil {
+	if err := publish(staging, destination, root, testID, false); err == nil {
 		t.Fatal("publishing a staging path that does not exist succeeded")
 	}
 
@@ -224,7 +225,7 @@ func TestPublishRefusesOperandsThatContainOneAnother(t *testing.T) {
 		write(t, staging, "precious")
 		write(t, filepath.Join(destination, "wedding.jpg"), "irreplaceable")
 
-		if err := publish(staging, destination, root, testID); err == nil {
+		if err := publish(staging, destination, root, testID, false); err == nil {
 			t.Fatal("publishing a directory over its own parent succeeded")
 		}
 
@@ -249,7 +250,7 @@ func TestPublishRefusesOperandsThatContainOneAnother(t *testing.T) {
 		destination := filepath.Join(staging, "2024")
 		write(t, destination, "precious")
 
-		if err := publish(staging, destination, root, testID); err == nil {
+		if err := publish(staging, destination, root, testID, false); err == nil {
 			t.Fatal("publishing a directory into its own subtree succeeded")
 		}
 		if _, err := os.Lstat(destination); err != nil {
@@ -264,7 +265,7 @@ func TestPublishRefusesOperandsThatContainOneAnother(t *testing.T) {
 		same := filepath.Join(root, "photos")
 		write(t, same, "precious")
 
-		if err := publish(same, same, root, testID); err == nil {
+		if err := publish(same, same, root, testID, false); err == nil {
 			t.Fatal("publishing an entry over itself succeeded")
 		}
 		if got := read(t, same); got != "precious" {
@@ -307,7 +308,7 @@ func TestPublishNeverLeavesTheDestinationAbsent(t *testing.T) {
 		}
 	}()
 
-	if err := publish(staging, destination, root, testID); err != nil {
+	if err := publish(staging, destination, root, testID, false); err != nil {
 		t.Fatal(err)
 	}
 	close(stop)
@@ -356,7 +357,7 @@ func TestPublishWritesNoMarkerBesideTheOperands(t *testing.T) {
 	write(t, filepath.Join(staging, "new.txt"), "the result")
 	write(t, filepath.Join(destination, "mine.txt"), "the caller's")
 
-	if err := publish(staging, destination, root, testID); err != nil {
+	if err := publish(staging, destination, root, testID, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -368,5 +369,87 @@ func TestPublishWritesNoMarkerBesideTheOperands(t *testing.T) {
 		if entry.Name() != "dest" {
 			t.Errorf("publish left %q behind", entry.Name())
 		}
+	}
+}
+
+// The refusal --no-replace exists for: the caller is told the name is taken, and
+// what is under that name is exactly as it was.
+func TestPublishRefusesAnOccupiedDestinationWhenAskedNot(t *testing.T) {
+	// Each is a different kind of occupied, and a check written with stat rather
+	// than with the rename would have had to remember all three.
+	cases := map[string]func(t *testing.T, at string){
+		"a file": func(t *testing.T, at string) { write(t, at, "precious") },
+		"an empty directory": func(t *testing.T, at string) {
+			if err := os.Mkdir(at, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"a dangling symlink": func(t *testing.T, at string) {
+			if err := os.Symlink(filepath.Join(at, "..", "gone"), at); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+
+	for name, occupy := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			staging := filepath.Join(root, ".flux-op-"+testID)
+			destination := filepath.Join(root, "dest")
+			write(t, staging, "the result")
+			occupy(t, destination)
+
+			err := publish(staging, destination, root, testID, true)
+			if !errors.Is(err, errDestinationExists) {
+				t.Fatalf("publishing onto %s gave %v, want a refusal the caller can tell apart", name, err)
+			}
+
+			// Both sides untouched: the caller's entry is theirs, and the result is
+			// still in staging for the caller to reclaim.
+			if got := read(t, staging); got != "the result" {
+				t.Errorf("staging holds %q", got)
+			}
+			if _, err := os.Lstat(destination); err != nil {
+				t.Errorf("the destination was disturbed by a publish that was refused: %v", err)
+			}
+		})
+	}
+}
+
+// And it is a refusal only when there is something to refuse.
+func TestPublishTakesAFreeNameWhenAskedNotToReplace(t *testing.T) {
+	root := t.TempDir()
+	staging := filepath.Join(root, ".flux-op-"+testID)
+	destination := filepath.Join(root, "dest")
+	write(t, staging, "the result")
+
+	if err := publish(staging, destination, root, testID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := read(t, destination); got != "the result" {
+		t.Errorf("destination holds %q, want the result", got)
+	}
+	if _, err := os.Lstat(staging); !os.IsNotExist(err) {
+		t.Error("staging is still there, so the publish copied rather than renamed")
+	}
+}
+
+// Without the flag a publish still REPLACES, which is what an upload and an
+// overwriting move are. The two behaviours share every other check, so the one
+// that destroys data has to be the one a caller asks for explicitly.
+func TestPublishStillReplacesWithoutTheFlag(t *testing.T) {
+	root := t.TempDir()
+	staging := filepath.Join(root, ".flux-op-"+testID)
+	destination := filepath.Join(root, "dest")
+	write(t, staging, "the result")
+	write(t, destination, "superseded")
+
+	if err := publish(staging, destination, root, testID, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := read(t, destination); got != "the result" {
+		t.Errorf("destination holds %q, want the result", got)
 	}
 }
