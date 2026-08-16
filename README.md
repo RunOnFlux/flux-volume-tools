@@ -53,7 +53,7 @@ an unprivileged system user is meant to remove.
 ## `flux-op` — publishing a result atomically
 
 ```
-flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] [--max-bytes N] [--ordinary-only] \
+flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] [--max-bytes N] [--data-only] \
         [--no-replace] <staging> <destination> -- [command [args...]]
 ```
 
@@ -133,15 +133,24 @@ a sweep deciding whether to delete somebody's only copy on that evidence is
 deciding on a coincidence. Removing the window the identity existed to survive is
 what makes the question go away.
 
-`--max-bytes` caps what the command may leave in staging, and `--ordinary-only`
-refuses a result holding anything that is not ordinary data — symlinks and hard
-links, which reach outside the result, and FIFOs, sockets and device nodes,
-which are not data at all. A FIFO matters as much as a link: whatever opens one
+`--max-bytes` caps what the command may leave in staging, and `--data-only`
+refuses a result holding a FIFO, a socket or a device node — none of which is
+data. A FIFO is the one an archive can actually deliver: whatever opens one
 without `O_NONBLOCK` waits for a writer that never comes, and `tar` both carries
-and recreates them. Both are checked **after**
-the command runs rather than from what an archive declares about itself: those
-figures are written by whoever built the archive, so a bomb simply lies about
-them. Staging is discarded on breach and the destination is never touched.
+and recreates them, so one left on a volume is a reader that hangs. Both checks
+run **after** the command rather than from what an archive declares about
+itself: those figures are written by whoever built the archive, so a bomb simply
+lies about them. Staging is discarded on breach and the destination is never
+touched.
+
+**Links are content, and are published.** A symlink among an application's own
+files is data its owner put there, and a hard link is what an archive holding one
+file twice becomes. What bounds a hostile archive is the container — one volume
+mounted, a read-only rootfs, no network — and what bounds a link left in the
+result is the reader: FluxOS opens files on a volume with `O_NOFOLLOW` and lists
+them with `lstat`, and syncthing carries a link as a link. Deciding it by
+classifying archive members instead is the approach whose failures fill the CVE
+lists.
 
 A failure anywhere before the publish removes staging immediately rather than
 leaving it for the startup sweep — a refused extraction gives the volume its
@@ -172,9 +181,9 @@ program's doing.
 | member named `../../../../etc/evil` | refused, nothing extracted | GNU tar — *"Member name contains '..'"* |
 | member named `/etc/hostname` | extracted as `etc/hostname` **inside** the target | GNU tar strips the leading `/` |
 | symlink, then a member written *through* it | the link is replaced by a real directory; nothing reaches the target | GNU tar |
-| a symlink left in the result | refused | `--ordinary-only` |
-| a hard link to data outside the result | refused | `--ordinary-only` |
-| a FIFO or socket | refused | `--ordinary-only` |
+| a symlink left in the result | published as a link | the container it was written in, and readers that do not follow one |
+| a hard link, or one file under two names | published, counted once | as above |
+| a FIFO, socket or device node | refused | `--data-only` |
 | a device node | cannot be created at all | `CAP_MKNOD` is dropped; FluxOS also mounts the volume `nodev` |
 | a setuid binary | the bit survives extraction, and is **inert** | FluxOS mounts the app volume `nosuid` |
 | an archive of many tiny files | refused once what it **occupies** exceeds the ceiling | `--max-bytes`, measured on what landed rather than on what the archive declares |
@@ -189,11 +198,12 @@ already exceeded the limit four thousand times over.
 
 Two of these are worth knowing rather than assuming.
 
-**The symlink defences are tar's, not ours.** `--ordinary-only` refuses a link
-*after* the command has run, so it catches a link left in the result — but a
-write *through* one would already have happened by then. What prevents it is GNU
-tar replacing the link with a directory. That is a reason the GNU pinning in the
-Contract below matters more than it appears: busybox tar is not the same program.
+**Two layers stop a hostile archive, and only one is ours.** GNU tar refuses a
+member whose name climbs out of the extraction directory, and refuses to write
+through a symlink it restored; `unzip` does neither. The container is what holds
+when the extractor does nothing — every host-backed mount is read-only except the
+one volume — and `test/container/adversarial_test.go` asserts that over the whole
+mount table rather than over a list of paths somebody thought of.
 
 **The setuid bit is preserved, and that is fine.** tar restores it and this
 program does not strip it, because the mount is where it is neutralised — one

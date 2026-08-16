@@ -2,6 +2,7 @@ package main
 
 import (
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,8 +28,8 @@ func TestInspectCountsEveryFileInTheTree(t *testing.T) {
 	if before.bytes < 350 {
 		t.Errorf("measured %d bytes, want at least the 350 of file content", before.bytes)
 	}
-	if before.hasIrregular {
-		t.Error("a tree with no links reported links")
+	if before.hasNonData {
+		t.Error("a tree of ordinary files reported something that is not data")
 	}
 
 	// Directories count towards the total as well as their contents, which is
@@ -46,10 +47,10 @@ func TestInspectCountsEveryFileInTheTree(t *testing.T) {
 	}
 }
 
-// A symlink is refused rather than followed. An app owner can write one into
-// their own volume, and a walk that followed it would leave the volume: a link
+// A symlink is data, and it is measured as the entry it is rather than as
+// whatever it points at. Following one would leave the volume entirely: a link
 // to / measures the host, and a link to .. never finishes.
-func TestInspectFindsASymlinkAndDoesNotFollowIt(t *testing.T) {
+func TestInspectMeasuresASymlinkWithoutFollowingIt(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "big")
 	write(t, outside, strings.Repeat("x", 100000))
@@ -63,8 +64,8 @@ func TestInspectFindsASymlinkAndDoesNotFollowIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.hasIrregular {
-		t.Error("the symlink was not reported")
+	if result.hasNonData {
+		t.Error("a symlink was reported as something that is not data")
 	}
 	// Bounded well below the 100,000 bytes behind the link and well above the
 	// handful of blocks a three-entry tree occupies. The old bound of 10,000 was
@@ -93,8 +94,8 @@ func TestInspectDoesNotDescendThroughALinkedDirectory(t *testing.T) {
 
 	select {
 	case result := <-done:
-		if !result.hasIrregular {
-			t.Error("the linked directory was not reported as a link")
+		if result.hasNonData {
+			t.Error("a linked directory was reported as something that is not data")
 		}
 	case <-timeoutAfterSeconds(10):
 		t.Fatal("the walk did not finish - it descended through the link")
@@ -102,8 +103,9 @@ func TestInspectDoesNotDescendThroughALinkedDirectory(t *testing.T) {
 }
 
 // Hard links are counted once, as du counts them, so a tree naming the same
-// data twice is not measured as twice the space it occupies.
-func TestInspectCountsHardLinkedDataOnceAndReportsIt(t *testing.T) {
+// data twice is not measured as twice the space it occupies - and an archive
+// that holds one file under two names is ordinary content, not a refusal.
+func TestInspectCountsHardLinkedDataOnce(t *testing.T) {
 	root := t.TempDir()
 	original := filepath.Join(root, "original")
 	write(t, original, strings.Repeat("x", 5000))
@@ -112,8 +114,8 @@ func TestInspectCountsHardLinkedDataOnceAndReportsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if before.hasIrregular {
-		t.Fatal("a tree with one ordinary file reported links")
+	if before.hasNonData {
+		t.Fatal("a tree with one ordinary file reported something that is not data")
 	}
 
 	if err := os.Link(original, filepath.Join(root, "second-name")); err != nil {
@@ -124,8 +126,8 @@ func TestInspectCountsHardLinkedDataOnceAndReportsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !after.hasIrregular {
-		t.Error("the hard link was not reported")
+	if after.hasNonData {
+		t.Error("a hard link was reported as something that is not data")
 	}
 	if grew := after.bytes - before.bytes; grew >= 5000 {
 		t.Errorf("the measurement grew by %d - the same data was counted twice", grew)
@@ -156,8 +158,8 @@ func TestInspectMeasuresASingleFile(t *testing.T) {
 	if result.bytes < 1234 {
 		t.Errorf("measured %d bytes, want at least the 1234 the file holds", result.bytes)
 	}
-	if result.hasIrregular {
-		t.Error("a plain file reported links")
+	if result.hasNonData {
+		t.Error("a plain file reported something that is not data")
 	}
 }
 
@@ -265,14 +267,13 @@ func TestInspectSkipsWhatItCannotRead(t *testing.T) {
 	}
 }
 
-// A link is not the only entry that is not ordinary data. A FIFO carries none at
-// all: whatever opens it without O_NONBLOCK waits for a writer that is never
-// coming, and tar both carries and recreates one - so an archive is all it takes
-// to put one on the volume.
+// A FIFO carries no data at all: whatever opens it without O_NONBLOCK waits for
+// a writer that is never coming, and tar both carries and recreates one - so an
+// archive is all it takes to put one on the volume.
 //
 // Device nodes cannot be made here, because CAP_MKNOD is dropped. FIFOs and
 // sockets need no capability at all.
-func TestInspectFindsAnEntryThatIsNotOrdinaryData(t *testing.T) {
+func TestInspectFindsAnEntryThatIsNotData(t *testing.T) {
 	root := t.TempDir()
 	write(t, filepath.Join(root, "ordinary"), "data")
 	if err := syscall.Mkfifo(filepath.Join(root, "pipe"), 0o644); err != nil {
@@ -283,14 +284,41 @@ func TestInspectFindsAnEntryThatIsNotOrdinaryData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.hasIrregular {
-		t.Error("a FIFO in the result was not reported, so --ordinary-only would publish it")
+	if !result.hasNonData {
+		t.Error("a FIFO in the result was not reported, so --data-only would publish it")
+	}
+	// Named, because an owner told their archive was refused has no other way to
+	// find out which entry did it.
+	if result.nonData != "pipe" {
+		t.Errorf("the refusal names %q, want pipe", result.nonData)
+	}
+}
+
+// A socket is the other one an unprivileged process can create, and it is not
+// data for the same reason.
+func TestInspectFindsASocket(t *testing.T) {
+	root := t.TempDir()
+	listener, err := net.Listen("unix", filepath.Join(root, "sock"))
+	if err != nil {
+		t.Skipf("this platform will not bind a unix socket here: %v", err)
+	}
+	defer listener.Close()
+
+	result, err := inspect(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.hasNonData {
+		t.Error("a socket in the result was not reported")
+	}
+	if result.nonData != "sock" {
+		t.Errorf("the refusal names %q, want sock", result.nonData)
 	}
 }
 
 // The directory holding the result is itself not a regular file, and refusing it
 // would refuse every extraction there is.
-func TestInspectDoesNotCallADirectoryIrregular(t *testing.T) {
+func TestInspectDoesNotCallADirectoryNonData(t *testing.T) {
 	root := t.TempDir()
 	write(t, filepath.Join(root, "nested", "deeper", "file"), "data")
 
@@ -298,7 +326,7 @@ func TestInspectDoesNotCallADirectoryIrregular(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.hasIrregular {
+	if result.hasNonData {
 		t.Error("an ordinary tree of files and directories was refused")
 	}
 }

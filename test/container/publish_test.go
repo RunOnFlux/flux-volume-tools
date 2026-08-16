@@ -109,24 +109,30 @@ func TestAResultOverTheCeilingIsRefusedAndReclaimed(t *testing.T) {
 	requireNoArtefacts(t, volume)
 }
 
-// An archive that carries a symlink and then writes through it reaches wherever
-// the link points. Inside this container that is nowhere useful, but the result
-// is published onto a volume that other code paths - and other nodes, through
-// sync - do read.
-func TestAResultContainingALinkIsRefused(t *testing.T) {
+// A link in the result is published as a link, target and all. Nothing here
+// reads through one, and the readers at the other end do not follow one either:
+// FluxOS opens files on a volume with O_NOFOLLOW and lists them with lstat, and
+// syncthing carries a link as a link.
+func TestAResultContainingALinkIsPublished(t *testing.T) {
 	volume := volumeDir(t)
 	seed(t, volume, `mkdir -p /work/src && ln -s /etc/shadow /work/src/link`)
 
 	staging := "/work/.flux-op-" + operationID
 	result := fluxOp(t, volume, "",
-		append(baseArgs("--discard-staging", "--ordinary-only", staging, "/work/dest", "--"),
+		append(baseArgs("--discard-staging", "--data-only", staging, "/work/dest", "--"),
 			"cp", "-a", "-T", "/work/src", staging)...)
 
-	if result.exit != 4 {
-		t.Fatalf("exit %d, want 4:\n%s", result.exit, result.output)
+	if result.exit != 0 {
+		t.Fatalf("exit %d, want 0:\n%s", result.exit, result.output)
 	}
-	if exists(t, volume, "dest") {
-		t.Error("the destination was published despite the refusal")
+	if target := inContainer(t, volume, "", `readlink /work/dest/link`); !strings.Contains(target.output, "/etc/shadow") {
+		t.Errorf("the link was not published as the link it was: %s", target.output)
+	}
+	// Still a link rather than a copy of what it points at. Whether some reader
+	// later follows it is that reader's business, and the readers that matter -
+	// FluxOS and syncthing - do not.
+	if entry := inContainer(t, volume, "", `test -L /work/dest/link && echo LINK || echo other`); !strings.Contains(entry.output, "LINK") {
+		t.Errorf("the published entry is not a link: %s", entry.output)
 	}
 	requireNoArtefacts(t, volume)
 }

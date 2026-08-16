@@ -15,7 +15,7 @@ import (
 // a busybox applet would otherwise go unnoticed.
 //
 // These run flux-op exactly as the executor runs it for an extraction:
-// --ordinary-only and a ceiling, into staging it created, publishing only on
+// --data-only and a ceiling, into staging it created, publishing only on
 // success.
 
 const archiveCeiling = "10000000"
@@ -24,7 +24,7 @@ func extract(t *testing.T, volume, archive string) outcome {
 	t.Helper()
 	staging := "/work/.flux-op-" + operationID
 	return fluxOp(t, volume, "", append(
-		baseArgs("--discard-staging", "--mkdir", "--ordinary-only", "--max-bytes", archiveCeiling,
+		baseArgs("--discard-staging", "--mkdir", "--data-only", "--max-bytes", archiveCeiling,
 			staging, "/work/out", "--"),
 		"tar", "xf", archive, "-C", staging)...)
 }
@@ -73,7 +73,7 @@ func TestAnArchiveWithAnAbsoluteMemberLandsInsideTheTarget(t *testing.T) {
 // link with a real directory rather than following it, so the write lands inside
 // the extraction and the link's target is untouched.
 //
-// This is the one case --ordinary-only cannot answer by itself. It runs after
+// This is the one case --data-only cannot answer by itself. It runs after
 // the command, so a write through a link would already have happened; what
 // prevents it is tar.
 func TestAnArchiveCannotWriteThroughItsOwnSymlink(t *testing.T) {
@@ -103,7 +103,7 @@ func TestAResultHoldingAFifoIsRefused(t *testing.T) {
 
 	staging := "/work/.flux-op-" + operationID
 	result := fluxOp(t, volume, "", append(
-		baseArgs("--discard-staging", "--mkdir", "--ordinary-only", staging, "/work/out", "--"),
+		baseArgs("--discard-staging", "--mkdir", "--data-only", staging, "/work/out", "--"),
 		"sh", "-c", "mkfifo "+staging+"/pipe && echo data > "+staging+"/ordinary")...)
 
 	if result.exit != 4 {
@@ -132,7 +132,7 @@ func TestAnArchiveOfManyTinyFilesIsMeasuredByWhatItOccupies(t *testing.T) {
 
 	staging := "/work/.flux-op-" + operationID
 	result := fluxOp(t, volume, "", append(
-		baseArgs("--discard-staging", "--mkdir", "--ordinary-only", "--max-bytes", "1000000",
+		baseArgs("--discard-staging", "--mkdir", "--data-only", "--max-bytes", "1000000",
 			staging, "/work/out", "--"),
 		"tar", "xf", "/work/archive.tar", "-C", staging)...)
 
