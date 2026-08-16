@@ -286,10 +286,88 @@ func TestAPublishRefusesAnOperandOutsideTheVolume(t *testing.T) {
 	write(t, v.staging, "the object being published")
 	write(t, outside, "displaced")
 
-	if err := publish(v.staging, outside, v.root, testID); err == nil {
+	if err := publish(v.staging, outside, v.root, testID, false); err == nil {
 		t.Fatal("published to a destination outside the volume root")
 	}
 	if got := read(t, outside); got != "displaced" {
 		t.Errorf("the destination holds %q", got)
+	}
+}
+
+// The whole reason --no-replace has a status of its own: the caller turns it
+// into "that name is in use" for an app owner, and it cannot get that from a
+// message without matching on the wording of whichever tool ran.
+func TestAnOccupiedDestinationHasItsOwnStatus(t *testing.T) {
+	v := newVolume(t)
+	write(t, v.staging, "the result")
+	write(t, v.destination, "the caller's")
+
+	if code := run(v.argv("--discard-staging", "--no-replace")); code != exitDestinationExists {
+		t.Fatalf("exit %d, want %d for a destination that is already there", code, exitDestinationExists)
+	}
+
+	if got := read(t, v.destination); got != "the caller's" {
+		t.Errorf("destination holds %q, so a refused publish wrote something", got)
+	}
+	// Nothing was exchanged, so staging is still this operation's own scratch and
+	// goes back now rather than waiting for the next boot sweep to notice it.
+	if left := v.leftovers(t); len(left) != 0 {
+		t.Errorf("a refused publish left %v behind", left)
+	}
+}
+
+// Creating a folder is this shape: no command at all, staging made here, and a
+// name that must be free. It is the same publish as everything else, which is
+// what keeps the create out of the caller's hands.
+func TestCreatingADirectoryOnAFreeName(t *testing.T) {
+	v := newVolume(t)
+
+	if code := run(v.argv("--discard-staging", "--mkdir", "--no-replace")); code != 0 {
+		t.Fatalf("exit %d, want 0", code)
+	}
+
+	info, err := os.Lstat(v.destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() {
+		t.Error("the destination is not a directory")
+	}
+	if left := v.leftovers(t); len(left) != 0 {
+		t.Errorf("creating a directory left %v behind", left)
+	}
+}
+
+// And the same shape onto a name that is taken, which is what an owner clicking
+// the button twice does.
+func TestCreatingADirectoryOnAnOccupiedName(t *testing.T) {
+	v := newVolume(t)
+	write(t, filepath.Join(v.destination, "theirs.txt"), "precious")
+
+	if code := run(v.argv("--discard-staging", "--mkdir", "--no-replace")); code != exitDestinationExists {
+		t.Fatalf("exit %d, want %d", code, exitDestinationExists)
+	}
+
+	if got := read(t, filepath.Join(v.destination, "theirs.txt")); got != "precious" {
+		t.Errorf("a folder that was already there holds %q", got)
+	}
+	if left := v.leftovers(t); len(left) != 0 {
+		t.Errorf("a refused create left %v behind", left)
+	}
+}
+
+// Without the flag the publish replaces, which is what an upload is. Asserted
+// here as well as in the publish tests because the flag is plumbed through
+// run(), and a flag that is parsed and never passed on reads as working.
+func TestWithoutTheFlagAPublishStillReplaces(t *testing.T) {
+	v := newVolume(t)
+	write(t, v.staging, "the result")
+	write(t, v.destination, "superseded")
+
+	if code := run(v.argv("--discard-staging")); code != 0 {
+		t.Fatalf("exit %d, want 0", code)
+	}
+	if got := read(t, v.destination); got != "the result" {
+		t.Errorf("destination holds %q, want the result", got)
 	}
 }

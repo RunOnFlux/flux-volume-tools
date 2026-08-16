@@ -330,3 +330,58 @@ func TestTheIdentifierAndVolumeRootAreRequired(t *testing.T) {
 		}
 	}
 }
+
+// --no-replace on the filesystem and kernel this actually runs on, which is the
+// half a unit test cannot answer for: it is a different rename flag from the
+// exchange, and the executor's seccomp profile decides whether the syscall
+// arrives at all.
+func TestNoReplaceRefusesAnOccupiedDestination(t *testing.T) {
+	volume := volumeDir(t)
+	seed(t, volume, `mkdir -p /work/src && echo new > /work/src/f && echo original > /work/dest`)
+
+	staging := "/work/.flux-op-" + operationID
+	result := fluxOp(t, volume, "",
+		append(baseArgs("--discard-staging", "--no-replace", staging, "/work/dest", "--"),
+			"cp", "-a", "-T", "/work/src", staging)...)
+
+	if result.exit != 5 {
+		t.Fatalf("exit %d, want 5:\n%s", result.exit, result.output)
+	}
+	if got := contents(t, volume, "dest"); got != "original" {
+		t.Errorf("destination holds %q, want original", got)
+	}
+	requireNoArtefacts(t, volume)
+}
+
+// Creating a folder: no command, staging made by flux-op, a name that must be
+// free. The publish is the same one every other operation uses, which is what
+// keeps a create from being a second way of writing to a volume.
+func TestCreatingADirectory(t *testing.T) {
+	volume := volumeDir(t)
+
+	staging := "/work/.flux-op-" + operationID
+	created := fluxOp(t, volume, "",
+		baseArgs("--discard-staging", "--mkdir", "--no-replace", staging, "/work/photos", "--")...)
+
+	if created.exit != 0 {
+		t.Fatalf("exit %d:\n%s", created.exit, created.output)
+	}
+	if !exists(t, volume, "photos") {
+		t.Fatalf("the folder was not created\n%s", tree(t, volume))
+	}
+	requireNoArtefacts(t, volume)
+
+	// The same request again, which is an owner clicking the button twice. The
+	// folder they already have is not disturbed, and the status says why.
+	seed(t, volume, `echo theirs > /work/photos/holiday.jpg`)
+	again := fluxOp(t, volume, "",
+		baseArgs("--discard-staging", "--mkdir", "--no-replace", staging, "/work/photos", "--")...)
+
+	if again.exit != 5 {
+		t.Fatalf("exit %d, want 5:\n%s", again.exit, again.output)
+	}
+	if got := contents(t, volume, "photos/holiday.jpg"); got != "theirs" {
+		t.Errorf("the folder that was already there holds %q", got)
+	}
+	requireNoArtefacts(t, volume)
+}

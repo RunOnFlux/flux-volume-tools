@@ -28,3 +28,19 @@ func exchange(a, b string) error {
 	}
 	return nil
 }
+
+// renameNoReplace on macOS, which spells RENAME_NOREPLACE as RENAME_EXCL. Same
+// guarantee: the kernel refuses the occupied name as part of the rename, so
+// nothing is decided about a moment that has already passed.
+func renameNoReplace(a, b string) error {
+	if err := unix.RenamexNp(a, b, unix.RENAME_EXCL); err != nil {
+		if err == unix.EEXIST || err == unix.ENOTEMPTY {
+			return fmt.Errorf("%w: %s", errDestinationExists, b)
+		}
+		if err == unix.ENOTSUP || err == unix.EINVAL {
+			return fmt.Errorf("this filesystem cannot refuse an occupied name as part of the rename, so publishing %s here could destroy what is already there: %w", b, err)
+		}
+		return fmt.Errorf("could not move %s to %s: %w", a, b, err)
+	}
+	return nil
+}

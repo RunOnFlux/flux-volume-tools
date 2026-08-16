@@ -48,3 +48,27 @@ func exchange(a, b string) error {
 	}
 	return nil
 }
+
+// renameNoReplace moves a onto b, or refuses because b is taken.
+//
+// The same call as the exchange above with the opposite flag, and it is used for
+// the same reason: the question and the action are one step. A caller that looked
+// first and renamed afterwards would be answering for a moment that has passed -
+// the app whose volume this is runs throughout, and may take the name in between.
+// Here the kernel compares and moves under the parent directory's own lock, so
+// "it already exists" is true of the instant nothing was written.
+//
+// An occupied name gives EEXIST; a directory gives ENOTEMPTY on some
+// filesystems, which means the same thing to the caller.
+func renameNoReplace(a, b string) error {
+	if err := unix.Renameat2(unix.AT_FDCWD, a, unix.AT_FDCWD, b, unix.RENAME_NOREPLACE); err != nil {
+		if err == unix.EEXIST || err == unix.ENOTEMPTY {
+			return fmt.Errorf("%w: %s", errDestinationExists, b)
+		}
+		if err == unix.ENOSYS || err == unix.EINVAL || err == unix.ENOTSUP {
+			return fmt.Errorf("this filesystem cannot refuse an occupied name as part of the rename, so publishing %s here could destroy what is already there: %w", b, err)
+		}
+		return fmt.Errorf("could not move %s to %s: %w", a, b, err)
+	}
+	return nil
+}

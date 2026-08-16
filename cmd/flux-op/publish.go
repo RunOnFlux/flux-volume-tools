@@ -1,11 +1,16 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// What --no-replace refuses. Reported to the caller as its own exit code, since
+// a status is the one part of a failure that does not depend on wording.
+var errDestinationExists = errors.New("the destination already exists")
 
 // publish moves the result into place.
 //
@@ -40,7 +45,14 @@ import (
 // destination are both inside the volume by construction, so that cannot happen
 // without something else already being wrong - and a non-atomic publish is
 // exactly what the caller was promised would not occur.
-func publish(staging, destination, root, id string) error {
+//
+// noReplace is the other guarantee some callers want: publish here, or refuse
+// because the name is taken. It is one syscall that answers both questions at
+// once, which is the only way to answer them truthfully - looking first and
+// renaming afterwards decides on a state that may have changed by the time the
+// rename runs, and the caller a create-folder or a rename answers is entitled to
+// "it exists" meaning it existed at the instant nothing was written.
+func publish(staging, destination, root, id string, noReplace bool) error {
 	// Neither operand may contain the other, decided before anything moves.
 	//
 	// Displacing the destination takes everything under it, so a destination
@@ -78,6 +90,15 @@ func publish(staging, destination, root, id string) error {
 	// touched at all.
 	if _, err := os.Lstat(staging); err != nil {
 		return err
+	}
+
+	// No look at the destination at all. The kernel refuses an occupied name as
+	// part of the rename, so there is no instant between deciding and acting for
+	// anything to change in - and a dangling symlink, an empty directory and a
+	// file are all equally occupied, which is the answer the caller wants and the
+	// one a stat would have had to be written carefully to give.
+	if noReplace {
+		return renameNoReplace(staging, destination)
 	}
 
 	// Lstat, not Stat: a dangling symlink at the destination is an entry that

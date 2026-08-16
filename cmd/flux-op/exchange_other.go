@@ -11,3 +11,11 @@ import "fmt"
 func exchange(a, b string) error {
 	return fmt.Errorf("atomically exchanging %s and %s needs linux", a, b)
 }
+
+// renameNoReplace where the platform cannot refuse an occupied name as part of
+// the rename. Refused for the same reason as above: doing it in two steps would
+// be a rename that can destroy what is at the destination, on some platforms and
+// not others, decided by something no caller can see.
+func renameNoReplace(a, b string) error {
+	return fmt.Errorf("moving %s to %s without replacing what is there needs linux", a, b)
+}
