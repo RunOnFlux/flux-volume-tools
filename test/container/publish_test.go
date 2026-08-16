@@ -10,40 +10,60 @@ import (
 	"time"
 )
 
-// The contract: the destination changes only on success, and it changes
-// atomically whatever the two entry types are.
+// How a collision at the destination is resolved, on the filesystem and kernel
+// this actually runs on - the half a unit test cannot answer for, since the
+// exchange, the no-replace refusal and the merge are three different rename
+// operations and the executor's seccomp profile decides which arrive at all.
 //
-// rename(2) cannot replace a file with a directory (or the reverse) at all, and
-// refuses a non-empty directory target - which is why publishing goes through a
-// swap rather than a delete-then-rename, and why every combination is covered
-// rather than just the common one.
-func TestPublishReplacesEveryCombinationOfTypes(t *testing.T) {
+// This is the table the file-operation endpoints are documented against.
+func TestPublishResolvesCollisionsByKind(t *testing.T) {
 	cases := []struct {
 		name        string
 		seed        string
-		wantAtDest  string
-		wantMissing string
+		merge       bool
+		wantExit    int
+		wantPresent []string
+		wantAbsent  []string
+		wantContent map[string]string
 	}{
 		{
-			name:       "a directory replaces an existing file",
-			seed:       `mkdir -p /work/src && echo new > /work/src/f && echo original > /work/dest`,
-			wantAtDest: "dest/f",
+			name:        "a new destination is one rename",
+			seed:        `mkdir -p /work/src && echo new > /work/src/f`,
+			wantExit:    0,
+			wantPresent: []string{"dest/f"},
 		},
 		{
-			name:        "a directory replaces an existing directory, without merging into it",
-			seed:        `mkdir -p /work/src /work/dest && echo new > /work/src/f && echo old > /work/dest/keep`,
-			wantAtDest:  "dest/f",
-			wantMissing: "dest/keep",
+			name:        "a file replaces a file",
+			seed:        `echo new > /work/src && echo old > /work/dest`,
+			wantExit:    0,
+			wantContent: map[string]string{"dest": "new"},
 		},
 		{
-			name:       "a file replaces an existing directory",
-			seed:       `mkdir -p /work/dest && echo new > /work/src && echo old > /work/dest/keep`,
-			wantAtDest: "dest",
+			name:        "a directory may not replace a file",
+			seed:        `mkdir -p /work/src && echo new > /work/src/f && echo original > /work/dest`,
+			wantExit:    6,
+			wantContent: map[string]string{"dest": "original"},
 		},
 		{
-			name:       "a new destination is one rename",
-			seed:       `mkdir -p /work/src && echo new > /work/src/f`,
-			wantAtDest: "dest/f",
+			name:        "a file may not replace a directory",
+			seed:        `mkdir -p /work/dest && echo new > /work/src && echo keepme > /work/dest/keep`,
+			wantExit:    6,
+			wantPresent: []string{"dest/keep"},
+		},
+		{
+			name:        "a directory is not replaced wholesale without a merge",
+			seed:        `mkdir -p /work/src /work/dest && echo new > /work/src/f && echo keepme > /work/dest/keep`,
+			wantExit:    6,
+			wantPresent: []string{"dest/keep"},
+			wantAbsent:  []string{"dest/f"},
+		},
+		{
+			name:        "a directory merges into a directory",
+			seed:        `mkdir -p /work/src /work/dest && echo new > /work/src/added && echo fromsrc > /work/src/shared && echo old > /work/dest/kept && echo fromdst > /work/dest/shared`,
+			merge:       true,
+			wantExit:    0,
+			wantPresent: []string{"dest/kept", "dest/added"},
+			wantContent: map[string]string{"dest/shared": "fromsrc"},
 		},
 	}
 
@@ -53,22 +73,53 @@ func TestPublishReplacesEveryCombinationOfTypes(t *testing.T) {
 			seed(t, volume, testCase.seed)
 
 			staging := "/work/.flux-op-" + operationID
+			extra := []string{"--discard-staging"}
+			if testCase.merge {
+				extra = append(extra, "--merge")
+			}
+			extra = append(extra, staging, "/work/dest", "--")
 			result := fluxOp(t, volume, "",
-				append(baseArgs("--discard-staging", staging, "/work/dest", "--"),
-					"cp", "-a", "-T", "/work/src", staging)...)
+				append(baseArgs(extra...), "cp", "-a", "-T", "/work/src", staging)...)
 
-			if result.exit != 0 {
-				t.Fatalf("exit %d:\n%s", result.exit, result.output)
+			if result.exit != testCase.wantExit {
+				t.Fatalf("exit %d, want %d:\n%s", result.exit, testCase.wantExit, result.output)
 			}
-			if !exists(t, volume, testCase.wantAtDest) {
-				t.Errorf("%s is not there\n%s", testCase.wantAtDest, tree(t, volume))
+			for _, name := range testCase.wantPresent {
+				if !exists(t, volume, name) {
+					t.Errorf("%s is not there\n%s", name, tree(t, volume))
+				}
 			}
-			if testCase.wantMissing != "" && exists(t, volume, testCase.wantMissing) {
-				t.Errorf("%s survived - the destination was merged into, not replaced\n%s",
-					testCase.wantMissing, tree(t, volume))
+			for _, name := range testCase.wantAbsent {
+				if exists(t, volume, name) {
+					t.Errorf("%s survived\n%s", name, tree(t, volume))
+				}
+			}
+			for name, want := range testCase.wantContent {
+				if got := contents(t, volume, name); got != want {
+					t.Errorf("%s holds %q, want %q", name, got, want)
+				}
 			}
 			requireNoArtefacts(t, volume)
 		})
+	}
+}
+
+// Finding 2 on the real kernel: a symlink inside the volume makes two paths name
+// one file, an exchange then moves nothing, and the cleanup a normal exchange
+// does next would delete it. Expressed as a move - no command, the source is the
+// result - which is the shape that reaches it in production.
+func TestMovingAFileOntoItselfUnderAnotherNameIsRefused(t *testing.T) {
+	volume := volumeDir(t)
+	seed(t, volume, `mkdir -p /work/photos && echo precious > /work/photos/a.jpg && ln -s photos /work/pics`)
+
+	result := fluxOp(t, volume, "",
+		baseArgs("/work/pics/a.jpg", "/work/photos/a.jpg", "--")...)
+
+	if result.exit != 6 {
+		t.Fatalf("exit %d, want 6:\n%s", result.exit, result.output)
+	}
+	if got := contents(t, volume, "photos/a.jpg"); got != "precious" {
+		t.Errorf("the file holds %q, want it left intact", got)
 	}
 }
 
@@ -158,17 +209,48 @@ func TestAMovePublishesWithNoCommandAtAll(t *testing.T) {
 	requireNoArtefacts(t, volume)
 }
 
-func TestAMoveOverAnExistingDestinationSwapsItAsideAndCleansUp(t *testing.T) {
+func TestAMoveReplacesAFileOfTheSameKindAndCleansUp(t *testing.T) {
 	volume := volumeDir(t)
-	seed(t, volume, `mkdir -p /work/photos && echo new > /work/photos/f && echo old > /work/out`)
+	seed(t, volume, `echo new > /work/src && echo old > /work/out`)
 
-	result := fluxOp(t, volume, "", baseArgs("/work/photos", "/work/out", "--")...)
+	result := fluxOp(t, volume, "", baseArgs("/work/src", "/work/out", "--")...)
 
 	if result.exit != 0 {
 		t.Fatalf("exit %d:\n%s", result.exit, result.output)
 	}
-	if got := contents(t, volume, "out/f"); got != "new" {
+	if got := contents(t, volume, "out"); got != "new" {
 		t.Errorf("destination holds %q, want new", got)
+	}
+	if exists(t, volume, "src") {
+		t.Error("the source was left behind after a move")
+	}
+	requireNoArtefacts(t, volume)
+}
+
+// A move that merges a directory into an existing one: no command, and no
+// --discard-staging, because the source IS the caller's data - so the emptied
+// source is removed by the publish rather than by the reclaim. What the
+// destination already held that the source did not name is kept.
+func TestAMoveMergesADirectoryAndRemovesTheSource(t *testing.T) {
+	volume := volumeDir(t)
+	seed(t, volume, `mkdir -p /work/src /work/out && echo new > /work/src/added && echo fromsrc > /work/src/shared && echo old > /work/out/kept && echo fromdst > /work/out/shared`)
+
+	result := fluxOp(t, volume, "", baseArgs("--merge", "/work/src", "/work/out", "--")...)
+
+	if result.exit != 0 {
+		t.Fatalf("exit %d:\n%s", result.exit, result.output)
+	}
+	if got := contents(t, volume, "out/kept"); got != "old" {
+		t.Errorf("out/kept holds %q - the merge did not keep what the source did not name", got)
+	}
+	if got := contents(t, volume, "out/added"); got != "new" {
+		t.Errorf("out/added holds %q - the merge did not bring the new entry in", got)
+	}
+	if got := contents(t, volume, "out/shared"); got != "fromsrc" {
+		t.Errorf("out/shared holds %q - a shared name was not overwritten by the source", got)
+	}
+	if exists(t, volume, "src") {
+		t.Error("the emptied source was left behind after a move-merge")
 	}
 	requireNoArtefacts(t, volume)
 }

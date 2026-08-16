@@ -313,7 +313,7 @@ func TestAPublishRefusesAnOperandOutsideTheVolume(t *testing.T) {
 	write(t, v.staging, "the object being published")
 	write(t, outside, "displaced")
 
-	if err := publish(v.staging, outside, v.root, testID, false); err == nil {
+	if err := publish(v.staging, outside, v.root, testID, false, false); err == nil {
 		t.Fatal("published to a destination outside the volume root")
 	}
 	if got := read(t, outside); got != "displaced" {

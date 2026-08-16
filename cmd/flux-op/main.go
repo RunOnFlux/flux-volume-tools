@@ -51,6 +51,7 @@ const (
 	exitTooLarge          = 3
 	exitNotData           = 4
 	exitDestinationExists = 5
+	exitWouldDestroy      = 6
 	// 128 + SIGTERM, which is what a shell reports for a signalled process and
 	// what FluxOS matches on to tell a cancelled operation from a failed one.
 	exitCanceled = 143
@@ -65,6 +66,7 @@ type options struct {
 	dataOnly       bool
 	fromStdin      bool
 	noReplace      bool
+	merge          bool
 
 	staging     string
 	destination string
@@ -72,7 +74,7 @@ type options struct {
 }
 
 const usage = "flux-op: usage: flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] " +
-	"[--max-bytes N] [--data-only] [--from-stdin] [--no-replace] <staging> <destination> " +
+	"[--max-bytes N] [--data-only] [--from-stdin] [--no-replace] [--merge] <staging> <destination> " +
 	"-- [command [args...]]"
 
 func main() {
@@ -128,6 +130,14 @@ func parse(argv []string) (*options, error) {
 	// folder, renaming beside an existing entry. The refusal is the rename's own,
 	// so nothing is decided about a state that may since have changed.
 	flags.BoolVar(&opts.noReplace, "no-replace", false, "refuse rather than replace an occupied destination")
+	// Overlay a directory onto an existing directory rather than replacing it.
+	// Only reached when the destination exists AND is a directory AND the staging
+	// result is one too: a file over a file is still an exchange, and a file over
+	// a directory (or the reverse) is refused whatever this says. Without it,
+	// replacing a directory would delete every entry the caller did not name but
+	// that sat beside one they did, so a directory is never replaced wholesale by
+	// default - a copy, a move or an extraction over an existing folder merges.
+	flags.BoolVar(&opts.merge, "merge", false, "overlay a directory onto an existing one instead of replacing it")
 
 	if err := flags.Parse(argv); err != nil {
 		return nil, errUsage
@@ -310,12 +320,19 @@ func run(argv []string) int {
 
 	reclaimStaging = false
 
-	if err := publish(opts.staging, opts.destination, opts.root, opts.id, opts.noReplace); err != nil {
+	if err := publish(opts.staging, opts.destination, opts.root, opts.id, opts.noReplace, opts.merge); err != nil {
 		// A publish that refused before moving anything leaves staging as this
 		// operation's own scratch rather than as the caller's data under another
 		// name, so it goes back now instead of waiting for the next boot sweep.
-		if errors.Is(err, errDestinationExists) || errors.Is(err, errNothingMoved) {
+		if errors.Is(err, errDestinationExists) || errors.Is(err, errNothingMoved) || errors.Is(err, errWouldDestroy) {
 			reclaimStaging = true
+		}
+		// Its own status, because the caller acts on it: a collision that could only
+		// be resolved by deleting data the request never named is a different answer
+		// from "the command failed", and the dashboard says which it was.
+		if errors.Is(err, errWouldDestroy) {
+			fmt.Fprintf(os.Stderr, "flux-op: %v\n", err)
+			return exitWouldDestroy
 		}
 		if errors.Is(err, errDestinationExists) {
 			fmt.Fprintf(os.Stderr, "flux-op: %v\n", err)
