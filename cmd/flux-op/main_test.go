@@ -173,16 +173,43 @@ func TestAResultOverTheCeilingIsRefusedAndReclaimed(t *testing.T) {
 	}
 }
 
-func TestAResultContainingALinkIsRefused(t *testing.T) {
+// A link in the result is published. Nothing here reads through one, and the
+// readers at the other end do not follow one either - so refusing it would only
+// take content away from the owner it belongs to.
+func TestAResultContainingALinkIsPublished(t *testing.T) {
 	v := newVolume(t)
-	argv := append(v.argv("--discard-staging", "--mkdir", "--ordinary-only"),
+	argv := append(v.argv("--discard-staging", "--mkdir", "--data-only"),
 		"sh", "-c", "ln -s /etc/hosts "+filepath.Join(v.staging, "link"))
 
-	if code := run(argv); code != exitNotOrdinary {
-		t.Fatalf("exit %d, want %d", code, exitNotOrdinary)
+	if code := run(argv); code != 0 {
+		t.Fatalf("exit %d, want 0", code)
+	}
+
+	info, err := os.Lstat(filepath.Join(v.destination, "link"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("the link was published as something other than a link")
+	}
+}
+
+// A FIFO is not published. Whatever opens one without O_NONBLOCK waits for a
+// writer that is never coming, so leaving one on the volume leaves a reader that
+// hangs.
+func TestAResultContainingAFifoIsRefused(t *testing.T) {
+	v := newVolume(t)
+	argv := append(v.argv("--discard-staging", "--mkdir", "--data-only"),
+		"sh", "-c", "mkfifo "+filepath.Join(v.staging, "pipe"))
+
+	if code := run(argv); code != exitNotData {
+		t.Fatalf("exit %d, want %d", code, exitNotData)
 	}
 	if _, err := os.Lstat(v.destination); err == nil {
 		t.Error("the destination was published despite the refusal")
+	}
+	if left := v.leftovers(t); len(left) != 0 {
+		t.Errorf("a refused result left %v behind", left)
 	}
 }
 

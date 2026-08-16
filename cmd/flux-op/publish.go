@@ -12,6 +12,11 @@ import (
 // a status is the one part of a failure that does not depend on wording.
 var errDestinationExists = errors.New("the destination already exists")
 
+// A publish that was refused before anything moved. Staging is still this
+// operation's own scratch when one of these comes back, so the caller reclaims
+// it now instead of leaving it on the volume for the next boot sweep.
+var errNothingMoved = errors.New("refused before anything moved")
+
 // publish moves the result into place.
 //
 // A destination that does not exist is one atomic rename and nothing to clean
@@ -69,7 +74,7 @@ func publish(staging, destination, root, id string, noReplace bool) error {
 	// this program exists to prevent. A caller that means "move this up a level"
 	// asks for <parent>/<name>, which is an ordinary publish.
 	if contains(destination, staging) || contains(staging, destination) {
-		return fmt.Errorf("%s and %s contain one another, so publishing one over the other would displace it", staging, destination)
+		return fmt.Errorf("%w: %s and %s contain one another, so publishing one over the other would displace it", errNothingMoved, staging, destination)
 	}
 
 	// Both operands inside the volume, checked here rather than assumed from
@@ -83,13 +88,13 @@ func publish(staging, destination, root, id string, noReplace bool) error {
 	// only thing standing between an app owner and the host - it is this
 	// program declining to hold that invariant on trust from its caller.
 	if !contains(root, staging) || !contains(root, destination) {
-		return fmt.Errorf("%s and %s must both be inside %s", staging, destination, root)
+		return fmt.Errorf("%w: %s and %s must both be inside %s", errNothingMoved, staging, destination, root)
 	}
 
 	// A staging path that is not there fails here, before the destination is
 	// touched at all.
 	if _, err := os.Lstat(staging); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errNothingMoved, err)
 	}
 
 	// No look at the destination at all. The kernel refuses an occupied name as

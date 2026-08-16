@@ -29,15 +29,27 @@ type inspection struct {
 	// not fill the volume, and a sparse file does not. An application can write
 	// into its own holes afterwards, but it can write to its own volume anyway.
 	bytes int64
-	// Whether the tree holds anything that is not ordinary data. Two kinds
-	// qualify and for different reasons: a link REACHES something outside
-	// itself, and a FIFO, socket or device node IS not data at all - whatever
-	// opens a FIFO without O_NONBLOCK waits for a writer that never comes.
+	// Whether the tree holds an entry that is not data: a FIFO, a socket or a
+	// device node. Whatever opens a FIFO without O_NONBLOCK waits for a writer
+	// that never comes, so one published onto a volume is a reader that hangs,
+	// and none of the three is something an application's archive carries for a
+	// reason.
 	//
 	// Device nodes cannot be created in the executor's container, which drops
 	// CAP_MKNOD. FIFOs and sockets need no capability, and tar both carries and
 	// recreates a FIFO - so an archive is all it takes.
-	hasIrregular bool
+	//
+	// Links are data and are not counted here. A symlink among an application's
+	// own files is content its owner put there, and a hard link is what an
+	// archive holding one file twice becomes. What bounds a hostile archive is
+	// the container: one volume mounted, a read-only rootfs, no network. What
+	// bounds a link left in the published result is the reader - FluxOS opens
+	// files on a volume with O_NOFOLLOW and lists them with lstat, and syncthing
+	// carries a link as a link rather than following it.
+	hasNonData bool
+	// The first such entry, relative to the result root, so a refusal can name
+	// the file the owner has to look at.
+	nonData string
 }
 
 // inspect walks the result once and answers both questions the publish gates on.
@@ -93,19 +105,21 @@ func inspect(root string) (inspection, error) {
 			return nil
 		}
 
-		// A directory is the shape of the result itself, so it is ordinary here
-		// even though it is not a regular file. Everything else that is neither
-		// is refused: symlinks, FIFOs, sockets and device nodes alike.
-		if !entry.Type().IsRegular() && !entry.IsDir() {
-			result.hasIrregular = true
+		// Files, directories and links are all data. A FIFO, a socket or a
+		// device node is not, and is what this reports.
+		if entry.Type()&(fs.ModeNamedPipe|fs.ModeSocket|fs.ModeDevice|fs.ModeCharDevice) != 0 && !result.hasNonData {
+			result.hasNonData = true
+			if relative, relErr := filepath.Rel(root, path); relErr == nil {
+				result.nonData = relative
+			} else {
+				result.nonData = path
+			}
 		}
 
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if ok && info.Mode().IsRegular() && uint64(stat.Nlink) > 1 {
-			// A second name for the same data, and the other one may be
-			// somewhere this result does not reach.
-			result.hasIrregular = true
-
+			// One file under two names occupies its blocks once, and counting it
+			// twice would refuse an archive for a size it does not take up.
 			key := [2]uint64{uint64(stat.Dev), uint64(stat.Ino)}
 			if _, counted := seen[key]; counted {
 				return nil

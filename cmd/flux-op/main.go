@@ -1,7 +1,7 @@
 // Command flux-op runs one file operation and publishes its result atomically.
 //
 //	flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] [--max-bytes N]
-//	        [--ordinary-only] [--from-stdin] [--no-replace] <staging> <destination>
+//	        [--data-only] [--from-stdin] [--no-replace] <staging> <destination>
 //	        -- [command [args...]]
 //
 // --id and --root together decide where the artefacts of an interrupted publish
@@ -49,7 +49,7 @@ var operationIdentifier = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{
 const (
 	exitUsage             = 2
 	exitTooLarge          = 3
-	exitNotOrdinary       = 4
+	exitNotData           = 4
 	exitDestinationExists = 5
 	// 128 + SIGTERM, which is what a shell reports for a signalled process and
 	// what FluxOS matches on to tell a cancelled operation from a failed one.
@@ -62,7 +62,7 @@ type options struct {
 	discardStaging bool
 	makeStaging    bool
 	maxBytes       int64
-	ordinaryOnly   bool
+	dataOnly       bool
 	fromStdin      bool
 	noReplace      bool
 
@@ -72,7 +72,7 @@ type options struct {
 }
 
 const usage = "flux-op: usage: flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] " +
-	"[--max-bytes N] [--ordinary-only] [--from-stdin] [--no-replace] <staging> <destination> " +
+	"[--max-bytes N] [--data-only] [--from-stdin] [--no-replace] <staging> <destination> " +
 	"-- [command [args...]]"
 
 func main() {
@@ -107,16 +107,16 @@ func parse(argv []string) (*options, error) {
 	// an archive's declared size is written by whoever built it. For --from-stdin
 	// it is enforced as the bytes arrive, because this program is the writer.
 	flags.Int64Var(&opts.maxBytes, "max-bytes", 0, "refuse a result larger than this")
-	// Refuse a result holding anything that is not ordinary data. Two kinds, for
-	// different reasons: a link reaches outside itself - an archive that carries
-	// one and then writes through it reaches wherever it points - and a FIFO or
-	// socket is not data at all, so whatever reads it without O_NONBLOCK waits
-	// for a writer that never comes.
+	// Refuse a result holding a FIFO, a socket or a device node. None of them is
+	// data: whatever opens a FIFO without O_NONBLOCK waits for a writer that
+	// never comes, so one sitting in an application's volume is a reader that
+	// hangs, and nothing an application archives has a reason to be one.
 	//
-	// Inside this container neither is much use, but the result is published
-	// onto a volume that other code paths - and other nodes, through sync - do
-	// read.
-	flags.BoolVar(&opts.ordinaryOnly, "ordinary-only", false, "refuse a result holding anything that is not ordinary data")
+	// Links are NOT refused. What stops a hostile archive reaching anything is
+	// this container - one volume mounted, a read-only rootfs, no network - and
+	// a link left in the result is answered by the readers at the other end,
+	// which open with O_NOFOLLOW and list with lstat.
+	flags.BoolVar(&opts.dataOnly, "data-only", false, "refuse a result holding a FIFO, socket or device node")
 	// The caller streams the content in rather than naming a command to produce
 	// it. There is no child process at all, so nothing can exit successfully on
 	// a short read: the transfer ends when the caller closes the stream, and the
@@ -288,7 +288,7 @@ func run(argv []string) int {
 	// against what actually landed rather than against what the input claimed
 	// about itself, because those numbers are written by whoever built the
 	// archive and a bomb simply lies.
-	if opts.maxBytes > 0 || opts.ordinaryOnly {
+	if opts.maxBytes > 0 || opts.dataOnly {
 		// --from-stdin has already enforced its own ceiling as it wrote, and
 		// cannot produce a link.
 		if !opts.fromStdin {
@@ -301,9 +301,9 @@ func run(argv []string) int {
 				fmt.Fprintf(os.Stderr, "flux-op: result is %d bytes, over the %d limit\n", result.bytes, opts.maxBytes)
 				return exitTooLarge
 			}
-			if opts.ordinaryOnly && result.hasIrregular {
-				fmt.Fprintln(os.Stderr, "flux-op: result holds something that is not ordinary data, which is not accepted here")
-				return exitNotOrdinary
+			if opts.dataOnly && result.hasNonData {
+				fmt.Fprintf(os.Stderr, "flux-op: result holds %s, which is not data and is not accepted here\n", result.nonData)
+				return exitNotData
 			}
 		}
 	}
@@ -311,11 +311,13 @@ func run(argv []string) int {
 	reclaimStaging = false
 
 	if err := publish(opts.staging, opts.destination, opts.root, opts.id, opts.noReplace); err != nil {
-		// A refused name moved nothing, so staging is still this operation's own
-		// scratch rather than the caller's data under a new name. Re-arming the
-		// reclaim gives the volume its space back now instead of at the next boot.
-		if errors.Is(err, errDestinationExists) {
+		// A publish that refused before moving anything leaves staging as this
+		// operation's own scratch rather than as the caller's data under another
+		// name, so it goes back now instead of waiting for the next boot sweep.
+		if errors.Is(err, errDestinationExists) || errors.Is(err, errNothingMoved) {
 			reclaimStaging = true
+		}
+		if errors.Is(err, errDestinationExists) {
 			fmt.Fprintf(os.Stderr, "flux-op: %v\n", err)
 			return exitDestinationExists
 		}
