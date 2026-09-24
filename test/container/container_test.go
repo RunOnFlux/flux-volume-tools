@@ -36,8 +36,8 @@ import (
 	"time"
 )
 
-// The identifier FluxOS passes. Its exact shape is what lets the boot sweep tell
-// this image's artefacts from a folder a user named.
+// The identifier FluxOS names a staging entry with. Its exact shape is what
+// lets the boot sweep tell a staging entry from a folder a user named.
 const operationID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
 
 func image() string {
@@ -245,5 +245,5 @@ func requireNoArtefacts(t *testing.T, volume string) {
 }
 
 func baseArgs(extra ...string) []string {
-	return append([]string{"--id", operationID, "--root", "/work"}, extra...)
+	return append([]string{"--root", "/work"}, extra...)
 }

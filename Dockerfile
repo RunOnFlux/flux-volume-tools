@@ -16,8 +16,7 @@ FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 WORKDIR /src
 # Dependencies resolved in their own layer, so a change to the source does not
 # refetch them. go.sum is what pins them: x/sys is the only one, and flux-op
-# needs it for statx, which is the syscall that reports an object's creation
-# time and whether the filesystem actually keeps one.
+# needs it for renameat2, the atomic exchange a publish is.
 COPY go.mod go.sum ./
 RUN go mod download
 

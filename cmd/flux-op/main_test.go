@@ -35,7 +35,7 @@ func newVolume(t *testing.T) volume {
 }
 
 func (v volume) argv(extra ...string) []string {
-	return append(append([]string{"--id", testID, "--root", v.root}, extra...),
+	return append(append([]string{"--root", v.root}, extra...),
 		v.staging, v.destination, "--")
 }
 
@@ -60,38 +60,22 @@ func TestUsageIsRefusedWithoutRunningAnything(t *testing.T) {
 		name string
 		argv []string
 	}{
-		{"no identifier", []string{"--root", v.root, v.staging, v.destination, "--"}},
-		{"no volume root", []string{"--id", testID, v.staging, v.destination, "--"}},
-		{"no operands", []string{"--id", testID, "--root", v.root}},
-		{"no -- before the command", []string{"--id", testID, "--root", v.root, v.staging, v.destination, "true"}},
+		{"no volume root", []string{v.staging, v.destination, "--"}},
+		{"no operands", []string{"--root", v.root}},
+		{"no -- before the command", []string{"--root", v.root, v.staging, v.destination, "true"}},
 		// After the --, which is where a command goes. Written as an extra
 		// operand it was refused for missing its separator instead, so the check
 		// this names was never reached.
 		{"input and a command together", append(v.argv("--from-stdin"), "true")},
 		{"input into a staging directory", v.argv("--from-stdin", "--mkdir")},
-
-		// The identifier names what an interrupted publish leaves behind, and
-		// the sweep that reclaims those artefacts matches one exact shape. It is
-		// checked here as well so the two cannot drift: a name this accepts and
-		// the sweep does not is a copy of the caller's data left on their volume
-		// permanently, invisible to them.
-		{"an identifier that is not the shape the sweep matches", []string{
-			"--id", "not-a-uuid", "--root", v.root, v.staging, v.destination, "--"}},
-		// Joined into a path, so traversal in it leaves the volume entirely.
-		{"an identifier that traverses", []string{
-			"--id", "../../escape", "--root", v.root, v.staging, v.destination, "--"}},
-		// A separator puts the artefacts in a subdirectory. The sweep reads the
-		// volume root and nowhere else, so nothing would ever reclaim them.
-		{"an identifier holding a separator", []string{
-			"--id", "3f2504e0-4f89-41d3-9a0c-0305e82c3301/sub", "--root", v.root, v.staging, v.destination, "--"}},
-		// Everything here is built by joining onto the root, and a relative one
-		// resolves against whatever directory this happens to be run from.
+		// The operands are checked against the root, and a relative one resolves
+		// against whatever directory this happens to be run from.
 		{"a volume root that is not absolute", []string{
-			"--id", testID, "--root", "work", v.staging, v.destination, "--"}},
+			"--root", "work", v.staging, v.destination, "--"}},
 		// Cleaning this would change where it points, so it is refused rather
 		// than quietly accepted as the directory it actually names.
 		{"a volume root that does not lead where it says", []string{
-			"--id", testID, "--root", v.root + "/../etc", v.staging, v.destination, "--"}},
+			"--root", v.root + "/../etc", v.staging, v.destination, "--"}},
 	}
 
 	for _, testCase := range cases {
@@ -130,7 +114,7 @@ func TestAFailureNeverDiscardsAnOperandTheCallerOwns(t *testing.T) {
 	source := filepath.Join(v.root, "photos")
 	write(t, filepath.Join(source, "f"), "precious")
 
-	argv := []string{"--id", testID, "--root", v.root, "--max-bytes", "1", source, v.destination, "--"}
+	argv := []string{"--root", v.root, "--max-bytes", "1", source, v.destination, "--"}
 	if code := run(argv); code != exitTooLarge {
 		t.Fatalf("exit %d, want %d", code, exitTooLarge)
 	}
@@ -146,7 +130,7 @@ func TestAMovePublishesWithNoCommandAtAll(t *testing.T) {
 	source := filepath.Join(v.root, "photos")
 	write(t, filepath.Join(source, "f"), "hi")
 
-	argv := []string{"--id", testID, "--root", v.root, source, v.destination, "--"}
+	argv := []string{"--root", v.root, source, v.destination, "--"}
 	if code := run(argv); code != 0 {
 		t.Fatalf("exit %d, want 0", code)
 	}
@@ -370,7 +354,7 @@ func TestAPublishThatIsRefusedFailsTheOperation(t *testing.T) {
 	write(t, inner, "precious")
 	write(t, filepath.Join(v.destination, "wedding.jpg"), "irreplaceable")
 
-	argv := []string{"--id", testID, "--root", v.root, inner, v.destination, "--"}
+	argv := []string{"--root", v.root, inner, v.destination, "--"}
 	if code := run(argv); code != 1 {
 		t.Errorf("exit %d, want 1", code)
 	}
@@ -390,7 +374,7 @@ func TestAPublishRefusesAnOperandOutsideTheVolume(t *testing.T) {
 	write(t, v.staging, "the object being published")
 	write(t, outside, "displaced")
 
-	if err := publish(v.staging, outside, v.root, testID, false, false); err == nil {
+	if err := publish(v.staging, outside, v.root, false, false); err == nil {
 		t.Fatal("published to a destination outside the volume root")
 	}
 	if got := read(t, outside); got != "displaced" {

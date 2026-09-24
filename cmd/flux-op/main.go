@@ -1,21 +1,16 @@
 // Command flux-op runs one file operation and publishes its result atomically.
 //
-//	flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] [--max-bytes N]
+//	flux-op --root <dir> [--discard-staging] [--mkdir] [--max-bytes N]
 //	        [--data-only] [--from-stdin] [--no-replace] <staging> <destination>
 //	        -- [command [args...]]
 //
-// --id and --root together decide where the artefacts of an interrupted publish
-// land and what they are called: <root>/.flux-old-<id> and its .dest marker.
-// Neither is derived from <staging>, because <staging> is not always a directory
-// this program created - a move publishes the caller's source where it stands,
-// so its "staging" is an arbitrary path at an arbitrary depth. A name derived
-// from it collides with what a user might call a folder, and a location derived
-// from it lands outside the one directory the startup sweep reads.
+// --root is the volume root. Staging and destination must both be inside it,
+// and a publish that would leave it is refused before anything moves.
 //
 // The command writes into <staging>, never into <destination>. Only if it
 // succeeds is the result moved into place. A command that fails, a container
 // that is stopped, and a node that loses power all leave <destination> exactly
-// as it was, with the incomplete work parked under a name the sweep recognises.
+// as it was; what is left in <staging> is the caller's to reclaim.
 //
 // This lives in the image rather than in the caller so that one container does
 // the work AND the publish: the "did it succeed" and "put it in place" decisions
@@ -32,17 +27,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
 )
-
-// The shape the startup sweep matches when it decides which entries at the
-// volume root are this program's artefacts. Checked here as well as there
-// because the two must not drift: a name accepted here and refused there is a
-// copy of the caller's data left on their volume permanently, at a name the
-// browser hides from them.
-var operationIdentifier = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // Exit codes the caller distinguishes. Everything else is the command's own
 // status, passed through unchanged.
@@ -58,7 +45,6 @@ const (
 )
 
 type options struct {
-	id             string
 	root           string
 	discardStaging bool
 	makeStaging    bool
@@ -73,7 +59,7 @@ type options struct {
 	command     []string
 }
 
-const usage = "flux-op: usage: flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] " +
+const usage = "flux-op: usage: flux-op --root <dir> [--discard-staging] [--mkdir] " +
 	"[--max-bytes N] [--data-only] [--from-stdin] [--no-replace] [--merge] <staging> <destination> " +
 	"-- [command [args...]]"
 
@@ -90,12 +76,8 @@ func parse(argv []string) (*options, error) {
 	flags.SetOutput(os.Stderr)
 	flags.Usage = func() { fmt.Fprintln(os.Stderr, usage) }
 
-	// Identifies this operation's artefacts. Supplied by the caller so that
-	// every name the sweep has to recognise has one exact shape.
-	flags.StringVar(&opts.id, "id", "", "identifier for this operation's artefacts")
-	// The volume root as this container sees it. Everything an interrupted
-	// publish leaves behind goes here, which is the one directory the sweep
-	// reads.
+	// The volume root as this container sees it. A publish refuses a staging
+	// or destination outside it.
 	flags.StringVar(&opts.root, "root", "", "the volume root inside the container")
 	// Staging is scratch this operation created, so a failure may throw it away.
 	// WITHOUT this, staging is never deleted - a move publishes the caller's
@@ -145,17 +127,8 @@ func parse(argv []string) (*options, error) {
 	}
 
 	rest := flags.Args()
-	if len(rest) < 3 || opts.id == "" || opts.root == "" {
+	if len(rest) < 3 || opts.root == "" {
 		return nil, errUsage
-	}
-
-	// Both are joined into paths below, so their shape is not a formality. An
-	// identifier carrying a separator puts the artefacts in a subdirectory the
-	// sweep never reads, and one carrying traversal puts them outside the volume
-	// altogether - in both cases leaving a copy of the caller's data that nothing
-	// will ever reclaim.
-	if !operationIdentifier.MatchString(opts.id) {
-		return nil, fmt.Errorf("flux-op: --id must be an operation identifier, not %q", opts.id)
 	}
 
 	root, ok := volumeRoot(opts.root)
@@ -335,7 +308,7 @@ func run(argv []string) int {
 
 	reclaimStaging = false
 
-	if err := publish(opts.staging, opts.destination, opts.root, opts.id, opts.noReplace, opts.merge); err != nil {
+	if err := publish(opts.staging, opts.destination, opts.root, opts.noReplace, opts.merge); err != nil {
 		// A publish that refused before moving anything leaves staging as this
 		// operation's own scratch rather than as the caller's data under another
 		// name, so it goes back now instead of waiting for the next boot sweep.
@@ -362,8 +335,9 @@ func run(argv []string) int {
 
 // volumeRoot normalises the volume root, and reports whether it is one.
 //
-// Absolute, because everything here is built by joining onto it and a relative
-// root resolves against whatever directory this happened to be started in.
+// Absolute, because a publish checks both operands are inside it, and a
+// relative root resolves against whatever directory this happened to be started
+// in.
 // Rejected rather than cleaned when cleaning would CHANGE where it points: a
 // root of /work/../etc is a path that does not lead where it says, and silently
 // accepting it as /etc would put this program to work somewhere nobody named.

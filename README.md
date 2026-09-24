@@ -10,9 +10,9 @@ ghcr.io/runonflux/flux-volume-tools
 ## What it is for
 
 FluxOS exposes a file API over an application's volume — the dashboard file
-browsers for WordPress, Minecraft, Palworld and Rust are built on it. Those
-operations previously ran on the **host** as root. This image lets them run inside a
-throwaway container instead, with only the target volume mounted.
+browsers for WordPress, Minecraft, Palworld and Rust are built on it. This image
+runs those operations inside a throwaway container, with only the target volume
+mounted, rather than on the host.
 
 Each operation gets a fresh container configured with:
 
@@ -40,10 +40,9 @@ can't — it exits 0 having written root-owned files. An app running as a non-ro
 user then loses access to its own data, silently. Those three capabilities are the
 minimum for `cp -a` to mean what it says; the rest stay dropped.
 
-Extraction is the mirror image: archive-recorded uids are attacker-supplied, so
-`tar --no-same-owner` is used to ignore them (verified: files land `0:0` regardless
-of what the archive claims), and ownership is then set to match the destination's
-parent.
+Extraction is the mirror image: archive-recorded uids and modes are
+attacker-supplied, so FluxOS runs `tar --no-same-owner --no-same-permissions` to
+ignore them, and extracted files land `0:0` whatever the archive claims.
 
 A second benefit: FluxOS must hold `/var/run/docker.sock` to function at all, so
 routing filesystem work through Docker adds no new privilege — whereas running
@@ -53,8 +52,8 @@ an unprivileged system user is meant to remove.
 ## `flux-op` — publishing a result atomically
 
 ```
-flux-op --id <id> --root <dir> [--discard-staging] [--mkdir] [--max-bytes N] [--data-only] \
-        [--no-replace] <staging> <destination> -- [command [args...]]
+flux-op --root <dir> [--discard-staging] [--mkdir] [--max-bytes N] [--data-only] \
+        [--from-stdin] [--no-replace] [--merge] <staging> <destination> -- [command [args...]]
 ```
 
 The command writes into `<staging>`, never into `<destination>`. Only on success
@@ -84,12 +83,10 @@ different sentence for a name in use than for an operation that failed, and a
 status is the one part of a failure that does not depend on which tool inside
 this image produced it.
 
-`--id` and `--root` name what an interrupted publish leaves behind and where —
-`<root>/.flux-op-<id>`. Neither is derived from `<staging>`, because `<staging>`
-is not always something this script created: for a move it is the caller's own
-path, at whatever depth they keep it. A name derived from it is indistinguishable
-from a folder the user chose, and a location derived from it lands outside the
-one directory the sweep reads.
+`--root` is the volume root as the container sees it. `<staging>` and
+`<destination>` must both be inside it, and a publish that would leave it is
+refused before anything moves. The caller names `<staging>`: for a move it is the
+caller's own path, and for everything else it is scratch the caller chose.
 
 `--discard-staging` says the staging operand is scratch this operation created,
 so a FAILURE may throw it away. **Without it, a failure never deletes staging** —
@@ -101,7 +98,7 @@ name holds the caller's PREVIOUS data and the destination holds what they asked
 for, so that entry is removed either way.
 
 A cancellation arrives as `SIGTERM` (docker `stop`, not `kill`). The command runs
-as a child so this script survives to trap it, forwards the signal — a container
+as a child so this program survives to trap it, forwards the signal — a container
 stop reaches only PID 1 — and reclaims staging before exiting. `SIGKILL` bypasses
 all of that, and the startup sweep remains the backstop for it.
 
@@ -116,29 +113,18 @@ Where the platform offers no atomic exchange the publish refuses rather than
 falling back. A guarantee that holds on some nodes and not others, decided by
 something no caller can see, is worse than none.
 
-Leftovers are named for a startup sweep to recognise:
-
-| Left behind | Means | Recovery |
-|---|---|---|
-| `.flux-op-<id>` | the operation never completed, or was interrupted around the exchange | delete; nobody is waiting for it, and the destination is complete either way |
-
-That is the whole recovery rule, and it is unconditional: no marker to parse, no
-recorded identity to compare, and nothing read from a directory the app owner can
-also write to.
-
-Recovery must not depend on identifying an entry, and that is not a stylistic
-preference. On ext4, measured over 200 back-to-back creations, a reused inode
-number came back **every** time and the creation time collided **108** times — so
-a sweep deciding whether to delete somebody's only copy on that evidence is
-deciding on a coincidence. Removing the window the identity existed to survive is
-what makes the question go away.
+The only thing an interrupted operation leaves is its staging entry, and
+recovery is one unconditional rule: delete it. Nobody is waiting for it, and the
+destination is complete either way. Nothing is recorded, so a sweep reads nothing
+the app owner can also write to. FluxOS names staging `.flux-op/<uuid>` at the
+volume root, and its startup sweep deletes what it finds there.
 
 `--max-bytes` caps what the command may leave in staging, and `--data-only`
 refuses a result holding a FIFO, a socket or a device node — none of which is
 data. A FIFO is the one an archive can actually deliver: whatever opens one
 without `O_NONBLOCK` waits for a writer that never comes, and `tar` both carries
-and recreates them, so one left on a volume is a reader that hangs. Both checks
-run **after** the command rather than from what an archive declares about
+and recreates them, so one left on a volume is a reader that hangs. Both are
+checked on what the command left rather than on what an archive declares about
 itself: those figures are written by whoever built the archive, so a bomb simply
 lies about them. Staging is discarded on breach and the destination is never
 touched.
@@ -248,15 +234,14 @@ There is no entrypoint. The executor always supplies argv.
 
 ## Consuming it
 
-Pin the **manifest list** digest, never a tag:
+FluxOS pins a release in `ZelBack/config/volumeToolsImage.json`: the tag, the
+manifest list digest, and each architecture's image id. A node accepts only an
+image whose id matches its own architecture's entry, whether it came from a peer
+or from GHCR.
 
-```
-ghcr.io/runonflux/flux-volume-tools@sha256:<manifest-list-digest>
-```
-
-The image is published for `linux/amd64` and `linux/arm64`. Pinning the manifest
-list digest resolves to the right architecture on each node; pinning a per-architecture
-digest instead would work on x86 and fail on every arm node.
+The image is published for `linux/amd64` and `linux/arm64`. The manifest list
+covers both; an image id is per architecture, so a pin needs both ids or it holds
+on x86 and fails on every arm node.
 
 ## Testing
 
@@ -278,8 +263,7 @@ The two halves answer different questions and neither substitutes for the other:
 
 Run the second half through the script rather than by hand. It needs a build tag
 *and* a freshly built image, so `go test ./...` runs none of it and still reports
-success — which is how a stale helper in that suite once sat failing for a whole
-session while the suite was believed green.
+success.
 
 `-count=1` is not optional for the container half: the image is an input the test
 cache cannot see, so rebuilding it and running again reports the previous result
@@ -297,17 +281,17 @@ without ever starting a container. The script passes it.
 It requires no secrets — GHCR publishing uses the automatic `GITHUB_TOKEN` with
 `packages: write`.
 
-Every build runs a smoke test first that asserts each binary above is the expected
-implementation, so a change in Alpine's packaging fails the build rather than
-shipping a busybox applet into production.
+The container suite asserts each binary above is the expected implementation
+(`TestToolchainIsTheExpectedImplementation`), so a change in Alpine's packaging
+fails the build rather than shipping a busybox applet into production.
 
 **The image that is published is the image that was tested.** Each architecture is
 built once, pushed by digest with no tag on it, and then pulled back out of the
 registry and tested through it. Only once both have passed does a final job
 assemble the manifest list from those digests — so a tag never names bytes that
-nothing ran. It used to build a second time to publish, and since the Dockerfile
-pins a minor Alpine tag and installs unpinned packages, two builds minutes apart
-were not required to agree.
+nothing ran. Building again to publish would not do: the Dockerfile pins a minor
+Alpine tag and installs unpinned packages, so two builds minutes apart are not
+required to agree.
 
 A digest carrying no tag is not published in any useful sense — nothing can
 resolve to it without already knowing it — so a failed run leaves an unreferenced
