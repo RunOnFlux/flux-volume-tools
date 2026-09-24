@@ -104,10 +104,11 @@ func parse(argv []string) (*options, error) {
 	// one a forgetful caller gets.
 	flags.BoolVar(&opts.discardStaging, "discard-staging", false, "staging is scratch and may be discarded")
 	flags.BoolVar(&opts.makeStaging, "mkdir", false, "create the staging directory first")
-	// A ceiling on what the operation may leave in staging. For a command it is
-	// checked afterwards, because the bytes are written by another program and
-	// an archive's declared size is written by whoever built it. For --from-stdin
-	// it is enforced as the bytes arrive, because this program is the writer.
+	// A ceiling on what the operation may leave in staging. For a command it
+	// caps each file the command writes, as it writes, and is checked on the
+	// whole result afterwards - from what landed, because an archive's declared
+	// size is written by whoever built it. For --from-stdin it is enforced as
+	// the bytes arrive, because this program is the writer.
 	flags.Int64Var(&opts.maxBytes, "max-bytes", 0, "refuse a result larger than this")
 	// Refuse a result holding a FIFO, a socket or a device node. None of them is
 	// data: whatever opens a FIFO without O_NONBLOCK waits for a writer that
@@ -266,7 +267,17 @@ func run(argv []string) int {
 		}
 
 	case len(opts.command) > 0:
+		restoreFileSize := func() {}
+		if opts.maxBytes > 0 {
+			restore, err := limitFileSize(opts.maxBytes)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "flux-op: could not limit the command's file size: %v\n", err)
+				return 1
+			}
+			restoreFileSize = restore
+		}
 		status, canceled, err := runChild(opts.command, os.Stdin, os.Stdout, os.Stderr)
+		restoreFileSize()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "flux-op: could not run the command: %v\n", err)
 			return 1
@@ -276,6 +287,10 @@ func run(argv []string) int {
 			return exitCanceled
 		}
 		if status != 0 {
+			if opts.maxBytes > 0 && stoppedByTheCap(status, opts.staging, opts.maxBytes) {
+				fmt.Fprintf(os.Stderr, "flux-op: result reached the %d byte limit\n", opts.maxBytes)
+				return exitTooLarge
+			}
 			return status
 		}
 

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -170,6 +171,82 @@ func TestAResultOverTheCeilingIsRefusedAndReclaimed(t *testing.T) {
 	}
 	if left := v.leftovers(t); len(left) != 0 {
 		t.Errorf("left behind %v", left)
+	}
+}
+
+// The ceiling holds while the command writes, not only once it has finished:
+// the volume it is the free space of never has more than the ceiling taken out
+// of it. Staging is kept here so the partial file can be measured.
+func TestACommandIsStoppedAtTheCeilingAsItWrites(t *testing.T) {
+	v := newVolume(t)
+	argv := append(v.argv("--max-bytes", "1000"),
+		"sh", "-c", "head -c 4000 /dev/zero > "+v.staging)
+
+	if code := run(argv); code != exitTooLarge {
+		t.Fatalf("exit %d, want %d", code, exitTooLarge)
+	}
+	info, err := os.Lstat(v.staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() > 1000 {
+		t.Errorf("the command wrote %d bytes past a ceiling of 1000", info.Size())
+	}
+}
+
+// zip writes into a temporary file beside its output and renames it into place
+// at the end, so when the cap stops it the result itself holds nothing. The
+// signal it was killed by is what says why.
+func TestACommandKilledByTheCapBesideItsResultIsTooLarge(t *testing.T) {
+	v := newVolume(t)
+	argv := append(v.argv("--discard-staging", "--max-bytes", "1000"),
+		"sh", "-c", "head -c 4000 /dev/zero > "+filepath.Join(v.root, "scratch"))
+
+	if code := run(argv); code != exitTooLarge {
+		t.Fatalf("exit %d, want %d", code, exitTooLarge)
+	}
+}
+
+// A command that fails for a reason of its own, well inside the ceiling, is
+// reported as itself rather than as too large.
+func TestAFailureUnderTheCeilingKeepsItsOwnStatus(t *testing.T) {
+	v := newVolume(t)
+	argv := append(v.argv("--discard-staging", "--max-bytes", "1000"),
+		"sh", "-c", "head -c 10 /dev/zero > "+v.staging+"; exit 7")
+
+	if code := run(argv); code != 7 {
+		t.Fatalf("exit %d, want 7", code)
+	}
+}
+
+// Without a ceiling nothing is capped, and the limit this process runs under
+// afterwards is the one it started with - it is lowered for the command only.
+func TestTheFileSizeLimitIsOnlyLoweredForACommandWithACeiling(t *testing.T) {
+	var before syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &before); err != nil {
+		t.Fatal(err)
+	}
+
+	v := newVolume(t)
+	argv := append(v.argv("--discard-staging"),
+		"sh", "-c", "head -c 4000 /dev/zero > "+v.staging)
+	if code := run(argv); code != 0 {
+		t.Fatalf("exit %d, want 0", code)
+	}
+	if got := len(read(t, v.destination)); got != 4000 {
+		t.Errorf("published %d bytes, want 4000", got)
+	}
+
+	capped := newVolume(t)
+	run(append(capped.argv("--discard-staging", "--max-bytes", "1000"),
+		"sh", "-c", "head -c 4000 /dev/zero > "+capped.staging))
+
+	var after syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Errorf("the file size limit is %+v after a run, was %+v", after, before)
 	}
 }
 

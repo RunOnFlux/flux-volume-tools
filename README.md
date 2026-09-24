@@ -143,6 +143,17 @@ itself: those figures are written by whoever built the archive, so a bomb simply
 lies about them. Staging is discarded on breach and the destination is never
 touched.
 
+`--max-bytes` also holds **while** the command runs. The command is started
+under a file-size limit (`RLIMIT_FSIZE`) of the ceiling, so the kernel stops any
+one file it writes at exactly that size. The ceiling is the volume's free space,
+and a single-file result — an archive — checked only afterwards would fill the
+volume first, leaving the application running on it nothing to write into. A
+command the limit stops exits `3`, the same as a result found over the ceiling
+afterwards: it is recognised by the signal the limit sends (zip) or by a file in
+the result at the ceiling (tar, whose compressor is the process the signal
+reaches). The limit is per file, so a result of many files is still bounded by
+the check afterwards.
+
 **Links are content, and are published.** A symlink among an application's own
 files is data its owner put there, and a hard link is what an archive holding one
 file twice becomes. What bounds a hostile archive is the container — one volume
