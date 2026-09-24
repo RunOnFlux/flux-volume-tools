@@ -32,26 +32,15 @@ var errWouldDestroy = errors.New("refused to avoid deleting data the caller did 
 //
 // Replacing one that DOES exist is one atomic EXCHANGE. rename(2) cannot do it:
 // it refuses a non-empty directory as its target, and refuses to replace a file
-// with a directory or the reverse at all. What this used to do instead was two
-// renames - move the destination aside under .flux-old-<id>, then move the
-// result in - which is a window, and everything downstream existed to survive
-// it: a marker recording where the parked data belonged, an identity recorded
-// so the sweep could tell whether the second rename had happened, and a boot
-// sweep reading a file inside a directory the application can write to.
+// with a directory or the reverse at all, so it would have to delete or move
+// the destination aside first - a window in which a crash loses it or parks it
+// under a name only a sweep could put back.
 //
 // The exchange has no in-between state. Either the entries are swapped or they
 // are not, and both are consistent - the destination holds something complete
 // either way, and the staging name holds something disposable either way. So
-// there is nothing to record, nothing to compare, and nothing for the sweep to
-// decide: it deletes the staging entry, which is what it already does with one.
-//
-// That comparison was worth removing rather than fixing. It was an inode number
-// and a creation time, and neither is unique: filesystems reuse inode numbers
-// at once, and inode timestamps come from a coarse clock, so an object the app
-// owner creates can carry the identity of the one that was published. Measured
-// on ext4: the inode is reused every time and the creation time collides more
-// than half the time. The sweep was deciding whether to delete somebody's only
-// copy on evidence a coincidence satisfies.
+// nothing is recorded and a sweep has nothing to decide: recovery is deleting
+// the staging entry, whichever side of the exchange a crash landed on.
 //
 // Renaming directly, rather than through mv, means a publish that would cross a
 // filesystem boundary fails instead of silently becoming a copy. Staging and
@@ -65,16 +54,12 @@ var errWouldDestroy = errors.New("refused to avoid deleting data the caller did 
 // renaming afterwards decides on a state that may have changed by the time the
 // rename runs, and the caller a create-folder or a rename answers is entitled to
 // "it exists" meaning it existed at the instant nothing was written.
-func publish(staging, destination, root, id string, noReplace, merge bool) error {
+func publish(staging, destination, root string, noReplace, merge bool) error {
 	// Neither operand may contain the other, decided before anything moves.
 	//
-	// Displacing the destination takes everything under it, so a destination
-	// that contains staging carries staging away and the second rename finds
-	// nothing - stopping in the interrupted state for an operation that was
-	// never going to work. The caller's whole folder is then parked under a name
-	// the reserved-name rules hide from them, and only the next boot sweep puts
-	// it back. The mirror case cannot be renamed at all: rename(2) refuses to
-	// move a directory into its own subtree.
+	// Publishing one over the other would displace it: the destination takes
+	// everything under it when it goes, staging included, and rename(2)
+	// refuses to move a directory into its own subtree.
 	//
 	// Refused rather than made to work. Completing it would mean deleting
 	// everything ELSE in the destination - entries the caller never named, which
@@ -86,11 +71,7 @@ func publish(staging, destination, root, id string, noReplace, merge bool) error
 	}
 
 	// Both operands inside the volume, checked here rather than assumed from
-	// the caller. This used to fall out of writing the marker - the record was
-	// the destination relative to the root, so a destination outside it could
-	// not be written down and the publish stopped. Removing the marker removed
-	// that, which is the kind of guard that disappears when the thing it was
-	// riding on goes: it is its own check now.
+	// the caller.
 	//
 	// flux-op is handed paths FluxOS has already resolved, so this is not the
 	// only thing standing between an app owner and the host - it is this

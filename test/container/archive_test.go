@@ -3,6 +3,8 @@
 package container
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -144,4 +146,129 @@ func TestAnArchiveOfManyTinyFilesIsMeasuredByWhatItOccupies(t *testing.T) {
 		t.Errorf("an extraction over the ceiling was published\n%s", tree(t, volume))
 	}
 	requireNoArtefacts(t, volume)
+}
+
+// Compression, run as the executor runs it: the archiver writes one file inside
+// a staging directory the executor made, whose other contents - zip's temp file
+// among them - the executor reclaims whole.
+
+const compressCeiling = 1000000
+
+func compressStaging(format string) string {
+	return "/work/.flux-op/" + operationID + "/archive." + format
+}
+
+// compress archives /work/src/noise in the given format, with the ceiling on.
+// Random bytes do not compress, so a source larger than the ceiling makes an
+// archive larger than it.
+func compress(t *testing.T, volume, format string, extra ...string) outcome {
+	t.Helper()
+	staging := compressStaging(format)
+	command := []string{"zip", "-r", "-q", "-y", staging, "--", "src/noise"}
+	if format == "tar.gz" {
+		command = []string{"tar", "-czf", staging, "--", "src/noise"}
+	}
+	args := append(extra, "--max-bytes", strconv.Itoa(compressCeiling), staging, "/work/out."+format, "--")
+	return fluxOp(t, volume, "", append(baseArgs(args...), command...)...)
+}
+
+func seedNoise(t *testing.T, volume string, bytes int) {
+	t.Helper()
+	seed(t, volume, fmt.Sprintf(`mkdir -p /work/src /work/.flux-op/%s && head -c %d /dev/urandom > /work/src/noise`,
+		operationID, bytes))
+}
+
+// The size of every file under the staging directory, largest first.
+func stagedSizes(t *testing.T, volume string) []int {
+	t.Helper()
+	result := inContainer(t, volume, "", `echo FLUXOP_SIZES=; find /work/.flux-op -type f -exec stat -c %s {} \; | sort -rn`)
+	index := strings.LastIndex(result.output, "FLUXOP_SIZES=")
+	if index < 0 {
+		t.Fatalf("could not list staging:\n%s", result.output)
+	}
+	var sizes []int
+	for _, field := range strings.Fields(result.output[index+len("FLUXOP_SIZES="):]) {
+		size, err := strconv.Atoi(field)
+		if err != nil {
+			t.Fatalf("could not read a size from %q:\n%s", field, result.output)
+		}
+		sizes = append(sizes, size)
+	}
+	return sizes
+}
+
+// The ceiling is the volume's free space, so it has to hold while the archiver
+// writes: an archive only checked once it is finished fills the volume first,
+// and the application running on it has nothing to write into until then.
+// Staging is kept here so what the archiver wrote can be measured.
+func TestAnArchiveIsStoppedAtTheCeilingAsItIsWritten(t *testing.T) {
+	for _, format := range []string{"zip", "tar.gz"} {
+		t.Run(format, func(t *testing.T) {
+			volume := volumeDir(t)
+			seedNoise(t, volume, 3*compressCeiling)
+
+			result := compress(t, volume, format)
+
+			if result.exit != 3 {
+				t.Errorf("exit %d, want 3 - the code that says the result was over the ceiling\n%s",
+					result.exit, result.output)
+			}
+			if !strings.Contains(result.output, "byte limit") {
+				t.Errorf("the refusal did not say what limit was reached:\n%s", result.output)
+			}
+			sizes := stagedSizes(t, volume)
+			// FIXTURE: the archiver must have written something, or "nothing is
+			// over the ceiling" is true of a run that never started.
+			if len(sizes) == 0 {
+				t.Fatalf("the archiver wrote nothing\n%s", tree(t, volume))
+			}
+			if sizes[0] > compressCeiling {
+				t.Errorf("the archiver wrote %d bytes past a ceiling of %d", sizes[0], compressCeiling)
+			}
+			if exists(t, volume, "out."+format) {
+				t.Errorf("an archive over the ceiling was published\n%s", tree(t, volume))
+			}
+		})
+	}
+}
+
+// Stopped, then reclaimed: the partial archive goes, and nothing is published.
+func TestAnArchiveOverTheCeilingIsReclaimed(t *testing.T) {
+	for _, format := range []string{"zip", "tar.gz"} {
+		t.Run(format, func(t *testing.T) {
+			volume := volumeDir(t)
+			seedNoise(t, volume, 3*compressCeiling)
+
+			result := compress(t, volume, format, "--discard-staging")
+
+			if result.exit != 3 {
+				t.Errorf("exit %d, want 3\n%s", result.exit, result.output)
+			}
+			if exists(t, volume, strings.TrimPrefix(compressStaging(format), "/work/")) {
+				t.Errorf("the partial archive was left in staging\n%s", tree(t, volume))
+			}
+			if exists(t, volume, "out."+format) {
+				t.Errorf("an archive over the ceiling was published\n%s", tree(t, volume))
+			}
+		})
+	}
+}
+
+// Under the ceiling, the cap changes nothing.
+func TestAnArchiveUnderTheCeilingIsPublished(t *testing.T) {
+	for _, format := range []string{"zip", "tar.gz"} {
+		t.Run(format, func(t *testing.T) {
+			volume := volumeDir(t)
+			seedNoise(t, volume, compressCeiling/10)
+
+			result := compress(t, volume, format, "--discard-staging")
+
+			if result.exit != 0 {
+				t.Fatalf("exit %d, want 0\n%s", result.exit, result.output)
+			}
+			if !exists(t, volume, "out."+format) {
+				t.Errorf("the archive was not published\n%s", tree(t, volume))
+			}
+		})
+	}
 }

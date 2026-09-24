@@ -399,23 +399,15 @@ func TestACancelledOperationStopsItsCommandAndReclaimsStaging(t *testing.T) {
 	requireNoArtefacts(t, volume)
 }
 
-func TestTheIdentifierAndVolumeRootAreRequired(t *testing.T) {
+func TestTheVolumeRootIsRequired(t *testing.T) {
 	volume := volumeDir(t)
 
-	cases := [][]string{
-		{"/work/.flux-op-1", "/work/dest", "--", "true"},
-		{"--id", operationID, "/work/.flux-op-1", "/work/dest", "--", "true"},
-		{"--root", "/work", "/work/.flux-op-1", "/work/dest", "--", "true"},
+	result := fluxOp(t, volume, "", "/work/.flux-op-1", "/work/dest", "--", "true")
+	if result.exit != 2 {
+		t.Errorf("exit %d, want 2:\n%s", result.exit, result.output)
 	}
-
-	for _, argv := range cases {
-		result := fluxOp(t, volume, "", argv...)
-		if result.exit != 2 {
-			t.Errorf("exit %d for %v, want 2:\n%s", result.exit, argv, result.output)
-		}
-		if exists(t, volume, "dest") {
-			t.Error("a refused invocation touched the destination")
-		}
+	if exists(t, volume, "dest") {
+		t.Error("a refused invocation touched the destination")
 	}
 }
 
