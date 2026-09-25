@@ -1,8 +1,8 @@
 // Command flux-op runs one file operation and publishes its result atomically.
 //
 //	flux-op --root <dir> [--discard-staging] [--mkdir] [--max-bytes N]
-//	        [--data-only] [--from-stdin] [--no-replace] <staging> <destination>
-//	        -- [command [args...]]
+//	        [--max-file-bytes N] [--data-only] [--from-stdin] [--no-replace]
+//	        <staging> <destination> -- [command [args...]]
 //
 // --root is the volume root. Staging and destination must both be inside it,
 // and a publish that would leave it is refused before anything moves.
@@ -31,9 +31,12 @@ import (
 	"syscall"
 )
 
-// Exit codes the caller distinguishes. Everything else is the command's own
-// status, passed through unchanged.
+// Exit codes the caller distinguishes. Only flux-op exits with them: a command
+// that fails exits exitCommandFailed whatever its own status, which is written
+// to stderr instead. A command's status would otherwise collide with these -
+// unzip exits 3 on a corrupt archive, zip 5 and 6 on errors of its own.
 const (
+	exitCommandFailed     = 1
 	exitUsage             = 2
 	exitTooLarge          = 3
 	exitNotData           = 4
@@ -49,6 +52,7 @@ type options struct {
 	discardStaging bool
 	makeStaging    bool
 	maxBytes       int64
+	maxFileBytes   int64
 	dataOnly       bool
 	fromStdin      bool
 	noReplace      bool
@@ -60,7 +64,7 @@ type options struct {
 }
 
 const usage = "flux-op: usage: flux-op --root <dir> [--discard-staging] [--mkdir] " +
-	"[--max-bytes N] [--data-only] [--from-stdin] [--no-replace] [--merge] <staging> <destination> " +
+	"[--max-bytes N] [--max-file-bytes N] [--data-only] [--from-stdin] [--no-replace] [--merge] <staging> <destination> " +
 	"-- [command [args...]]"
 
 func main() {
@@ -86,12 +90,18 @@ func parse(argv []string) (*options, error) {
 	// one a forgetful caller gets.
 	flags.BoolVar(&opts.discardStaging, "discard-staging", false, "staging is scratch and may be discarded")
 	flags.BoolVar(&opts.makeStaging, "mkdir", false, "create the staging directory first")
-	// A ceiling on what the operation may leave in staging. For a command it
-	// caps each file the command writes, as it writes, and is checked on the
-	// whole result afterwards - from what landed, because an archive's declared
-	// size is written by whoever built it. For --from-stdin it is enforced as
-	// the bytes arrive, because this program is the writer.
+	// A ceiling on what the operation may leave in staging. For a command it is
+	// checked on the whole result afterwards, by what the result occupies - from
+	// what landed, because an archive's declared size is written by whoever
+	// built it. For --from-stdin it is enforced as the bytes arrive, because this
+	// program is the writer.
 	flags.Int64Var(&opts.maxBytes, "max-bytes", 0, "refuse a result larger than this")
+	// A ceiling on the length of each file a command writes, enforced by the
+	// kernel as it writes. For a command whose output size is unknown until it
+	// is written - an archiver, an extraction - so that it is stopped before it
+	// takes the volume rather than refused after. It counts a file's length,
+	// not what it occupies, so a sparse file counts at its full length.
+	flags.Int64Var(&opts.maxFileBytes, "max-file-bytes", 0, "stop a command writing any file longer than this")
 	// Refuse a result holding a FIFO, a socket or a device node. None of them is
 	// data: whatever opens a FIFO without O_NONBLOCK waits for a writer that
 	// never comes, so one sitting in an application's volume is a reader that
@@ -145,6 +155,9 @@ func parse(argv []string) (*options, error) {
 
 	if opts.fromStdin && len(opts.command) > 0 {
 		return nil, errors.New("flux-op: --from-stdin takes no command")
+	}
+	if opts.fromStdin && opts.maxFileBytes > 0 {
+		return nil, errors.New("flux-op: --max-file-bytes limits a command's files, and --from-stdin runs none")
 	}
 	if opts.fromStdin && opts.makeStaging {
 		return nil, errors.New("flux-op: --from-stdin writes a file, so it cannot also create staging as a directory")
@@ -241,8 +254,8 @@ func run(argv []string) int {
 
 	case len(opts.command) > 0:
 		restoreFileSize := func() {}
-		if opts.maxBytes > 0 {
-			restore, err := limitFileSize(opts.maxBytes)
+		if opts.maxFileBytes > 0 {
+			restore, err := limitFileSize(opts.maxFileBytes)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "flux-op: could not limit the command's file size: %v\n", err)
 				return 1
@@ -260,11 +273,12 @@ func run(argv []string) int {
 			return exitCanceled
 		}
 		if status != 0 {
-			if opts.maxBytes > 0 && stoppedByTheCap(status, opts.staging, opts.maxBytes) {
-				fmt.Fprintf(os.Stderr, "flux-op: result reached the %d byte limit\n", opts.maxBytes)
+			if opts.maxFileBytes > 0 && stoppedByTheCap(status, opts.staging, opts.maxFileBytes) {
+				fmt.Fprintf(os.Stderr, "flux-op: a file reached the %d byte limit\n", opts.maxFileBytes)
 				return exitTooLarge
 			}
-			return status
+			fmt.Fprintf(os.Stderr, "flux-op: command exited %d\n", status)
+			return exitCommandFailed
 		}
 
 		// An EMPTY command is legitimate and is how a move is expressed: its

@@ -2,7 +2,9 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -163,7 +165,7 @@ func TestAResultOverTheCeilingIsRefusedAndReclaimed(t *testing.T) {
 // of it. Staging is kept here so the partial file can be measured.
 func TestACommandIsStoppedAtTheCeilingAsItWrites(t *testing.T) {
 	v := newVolume(t)
-	argv := append(v.argv("--max-bytes", "1000"),
+	argv := append(v.argv("--max-file-bytes", "1000"),
 		"sh", "-c", "head -c 4000 /dev/zero > "+v.staging)
 
 	if code := run(argv); code != exitTooLarge {
@@ -183,7 +185,7 @@ func TestACommandIsStoppedAtTheCeilingAsItWrites(t *testing.T) {
 // signal it was killed by is what says why.
 func TestACommandKilledByTheCapBesideItsResultIsTooLarge(t *testing.T) {
 	v := newVolume(t)
-	argv := append(v.argv("--discard-staging", "--max-bytes", "1000"),
+	argv := append(v.argv("--discard-staging", "--max-file-bytes", "1000"),
 		"sh", "-c", "head -c 4000 /dev/zero > "+filepath.Join(v.root, "scratch"))
 
 	if code := run(argv); code != exitTooLarge {
@@ -192,14 +194,58 @@ func TestACommandKilledByTheCapBesideItsResultIsTooLarge(t *testing.T) {
 }
 
 // A command that fails for a reason of its own, well inside the ceiling, is
-// reported as itself rather than as too large.
-func TestAFailureUnderTheCeilingKeepsItsOwnStatus(t *testing.T) {
+// reported as a failed command rather than as too large.
+func TestAFailureUnderTheCeilingIsACommandFailure(t *testing.T) {
 	v := newVolume(t)
-	argv := append(v.argv("--discard-staging", "--max-bytes", "1000"),
+	argv := append(v.argv("--discard-staging", "--max-file-bytes", "1000"),
 		"sh", "-c", "head -c 10 /dev/zero > "+v.staging+"; exit 7")
 
-	if code := run(argv); code != 7 {
-		t.Fatalf("exit %d, want 7", code)
+	if code := run(argv); code != exitCommandFailed {
+		t.Fatalf("exit %d, want %d", code, exitCommandFailed)
+	}
+}
+
+// A command's own status never reads as one of flux-op's refusals, whichever
+// number it is.
+func TestACommandStatusIsNeverARefusal(t *testing.T) {
+	for _, status := range []int{exitUsage, exitTooLarge, exitNotData, exitDestinationExists, exitWouldDestroy, exitCanceled} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			v := newVolume(t)
+			argv := append(v.argv("--discard-staging", "--mkdir"),
+				"sh", "-c", "exit "+strconv.Itoa(status))
+
+			if code := run(argv); code != exitCommandFailed {
+				t.Fatalf("a command exiting %d made flux-op exit %d, want %d", status, code, exitCommandFailed)
+			}
+		})
+	}
+}
+
+// --max-bytes is checked on the result once the command has finished, by what
+// it occupies, and does not limit the command's files as it writes them.
+func TestTheResultCeilingDoesNotLimitACommandsFiles(t *testing.T) {
+	own, err := exec.Command("sh", "-c", "ulimit -f").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v := newVolume(t)
+	argv := append(v.argv("--discard-staging", "--mkdir", "--max-bytes", "1000000"),
+		"sh", "-c", "ulimit -f > "+filepath.Join(v.staging, "limit"))
+	if code := run(argv); code != 0 {
+		t.Fatalf("exit %d, want 0", code)
+	}
+
+	if got := read(t, filepath.Join(v.destination, "limit")); got != string(own) {
+		t.Errorf("the command ran under a file size limit of %q, want %q", got, own)
+	}
+}
+
+// A streamed upload runs no command, so there is no file for the limit to cap.
+func TestAFileCeilingIsRefusedForAStreamedUpload(t *testing.T) {
+	v := newVolume(t)
+	if code := run(v.argv("--discard-staging", "--from-stdin", "--max-file-bytes", "1000")); code != exitUsage {
+		t.Fatalf("exit %d, want %d", code, exitUsage)
 	}
 }
 
@@ -222,7 +268,7 @@ func TestTheFileSizeLimitIsOnlyLoweredForACommandWithACeiling(t *testing.T) {
 	}
 
 	capped := newVolume(t)
-	run(append(capped.argv("--discard-staging", "--max-bytes", "1000"),
+	run(append(capped.argv("--discard-staging", "--max-file-bytes", "1000"),
 		"sh", "-c", "head -c 4000 /dev/zero > "+capped.staging))
 
 	var after syscall.Rlimit

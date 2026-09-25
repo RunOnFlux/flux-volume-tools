@@ -52,8 +52,8 @@ an unprivileged system user is meant to remove.
 ## `flux-op` — publishing a result atomically
 
 ```
-flux-op --root <dir> [--discard-staging] [--mkdir] [--max-bytes N] [--data-only] \
-        [--from-stdin] [--no-replace] [--merge] <staging> <destination> -- [command [args...]]
+flux-op --root <dir> [--discard-staging] [--mkdir] [--max-bytes N] [--max-file-bytes N] \
+        [--data-only] [--from-stdin] [--no-replace] [--merge] <staging> <destination> -- [command [args...]]
 ```
 
 The command writes into `<staging>`, never into `<destination>`. Only on success
@@ -82,6 +82,12 @@ Exit **5** rather than a message, because the caller shows an app owner a
 different sentence for a name in use than for an operation that failed, and a
 status is the one part of a failure that does not depend on which tool inside
 this image produced it.
+
+**A command's own status is never passed through.** A command that fails makes
+flux-op exit **1** and write `flux-op: command exited N` to stderr. The statuses
+flux-op names — `2`, `3`, `4`, `5`, `6` and `143` — therefore come only from
+flux-op: unzip exits `3` on a corrupt archive, and zip `5` and `6` on errors of
+its own, none of which is the refusal those numbers name here.
 
 `--root` is the volume root as the container sees it. `<staging>` and
 `<destination>` must both be inside it, and a publish that would leave it is
@@ -129,16 +135,23 @@ itself: those figures are written by whoever built the archive, so a bomb simply
 lies about them. Staging is discarded on breach and the destination is never
 touched.
 
-`--max-bytes` also holds **while** the command runs. The command is started
-under a file-size limit (`RLIMIT_FSIZE`) of the ceiling, so the kernel stops any
-one file it writes at exactly that size. The ceiling is the volume's free space,
-and a single-file result — an archive — checked only afterwards would fill the
-volume first, leaving the application running on it nothing to write into. A
-command the limit stops exits `3`, the same as a result found over the ceiling
-afterwards: it is recognised by the signal the limit sends (zip) or by a file in
-the result at the ceiling (tar, whose compressor is the process the signal
-reaches). The limit is per file, so a result of many files is still bounded by
-the check afterwards.
+`--max-file-bytes` holds **while** the command runs, for a command whose output
+size is unknown until it is written — an archiver or an extraction. The command
+is started under a file-size limit (`RLIMIT_FSIZE`) of that value, so the kernel
+stops any one file it writes at exactly that length. The caller sets it from the
+volume's free space, and a single-file result — an archive — checked only
+afterwards would fill the volume first, leaving the application running on it
+nothing to write into. A command the limit stops exits `3`, the same as a result
+found over `--max-bytes` afterwards: it is recognised by the signal the limit
+sends (zip) or by a file in the result at the limit (tar, whose compressor is the
+process the signal reaches). The limit is per file, so a result of many files is
+still bounded by the check afterwards.
+
+The kernel compares the offset being written, not the space a file occupies, so
+a sparse file counts at its full length under `--max-file-bytes`. A copy, whose
+size the caller measures before it starts, is checked only by `--max-bytes`,
+which counts what the result occupies — so a sparse file that fits is copied,
+still sparse.
 
 **Links are content, and are published.** A symlink among an application's own
 files is data its owner put there, and a hard link is what an archive holding one
@@ -183,6 +196,7 @@ program's doing.
 | a FIFO, socket or device node | refused | `--data-only` |
 | a device node | cannot be created at all | `CAP_MKNOD` is dropped; FluxOS also mounts the volume `nodev` |
 | a setuid binary | the bit survives extraction, and is **inert** | FluxOS mounts the app volume `nosuid` |
+| a member that expands past the free space | stopped as it is written, at the ceiling | `--max-file-bytes` |
 | an archive of many tiny files | refused once what it **occupies** exceeds the ceiling | `--max-bytes`, measured on what landed rather than on what the archive declares |
 | anything reaching off the volume | nowhere to land | no network, read-only rootfs, the volume is the only mount |
 

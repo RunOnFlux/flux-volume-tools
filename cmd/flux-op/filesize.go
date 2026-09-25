@@ -11,12 +11,18 @@ import (
 // the kernel - the writer is sent SIGXFSZ, or given EFBIG if it ignores that -
 // so the file stops at exactly maxBytes, whatever the program writing it does.
 //
-// This is what makes --max-bytes hold while a command runs rather than only
-// once it has finished. The ceiling is the volume's free space, and an archiver
-// that is only checked afterwards fills the volume first, leaving the running
+// This is --max-file-bytes: a ceiling that holds while a command runs rather
+// than only once it has finished. The caller sets it from the volume's free
+// space for a command whose output size is unknown until it is written, and an
+// archiver checked only afterwards fills the volume first, leaving the running
 // application with nothing to write into until the refusal gives the space
 // back. An archiver writes one file, so capping each file caps what it can
 // take.
+//
+// The kernel compares the offset being written against the cap, so a sparse
+// file is stopped at its length whatever it occupies. A command whose output
+// size is known before it starts - a copy - is checked by what it occupies
+// instead, and runs without this.
 //
 // Only the soft limit is lowered. The hard limit is left where it was so that
 // restore can raise the soft limit back: lowering the hard limit is permanent
