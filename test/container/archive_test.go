@@ -118,6 +118,37 @@ func TestAResultHoldingAFifoIsRefused(t *testing.T) {
 	requireNoArtefacts(t, volume)
 }
 
+// unzip exits 3 on a corrupt archive, which is also the status that says a
+// result was over the ceiling. A command's own status is never passed through,
+// so the corruption reads as a failed command and unzip's own reason is kept.
+func TestACorruptArchiveIsNotReportedAsTooLarge(t *testing.T) {
+	volume := volumeDir(t)
+	// A stored one-byte member ends at offset 32, where the central directory
+	// starts; overwriting its signature leaves the end record pointing at nothing.
+	seed(t, volume, `cd /work && printf x > a && zip -q -0 -X archive.zip a && rm a &&
+		printf XXXX | dd of=archive.zip bs=1 seek=32 conv=notrunc 2>/dev/null`)
+
+	staging := "/work/.flux-op-" + operationID
+	result := fluxOp(t, volume, "", append(
+		baseArgs("--discard-staging", "--mkdir", "--data-only", "--max-bytes", "1000000",
+			staging, "/work/out", "--"),
+		"unzip", "-q", "/work/archive.zip", "-d", staging)...)
+
+	if result.exit != 1 {
+		t.Errorf("exit %d, want 1 - a failed command\n%s", result.exit, result.output)
+	}
+	if !strings.Contains(result.output, "command exited 3") {
+		t.Errorf("the command's own status is missing from the output\n%s", result.output)
+	}
+	if !strings.Contains(result.output, "central directory") {
+		t.Errorf("unzip's own reason is missing from the output\n%s", result.output)
+	}
+	if exists(t, volume, "out") {
+		t.Errorf("a failed extraction was published\n%s", tree(t, volume))
+	}
+	requireNoArtefacts(t, volume)
+}
+
 // A file occupies whole blocks, so an archive of many tiny files consumes
 // thousands of times what it reports. The ceiling handed to an extraction is the
 // volume's free space - a count of blocks - so measuring what the files say

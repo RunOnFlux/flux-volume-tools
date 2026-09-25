@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -192,14 +193,30 @@ func TestACommandKilledByTheCapBesideItsResultIsTooLarge(t *testing.T) {
 }
 
 // A command that fails for a reason of its own, well inside the ceiling, is
-// reported as itself rather than as too large.
-func TestAFailureUnderTheCeilingKeepsItsOwnStatus(t *testing.T) {
+// reported as a failed command rather than as too large.
+func TestAFailureUnderTheCeilingIsACommandFailure(t *testing.T) {
 	v := newVolume(t)
 	argv := append(v.argv("--discard-staging", "--max-bytes", "1000"),
 		"sh", "-c", "head -c 10 /dev/zero > "+v.staging+"; exit 7")
 
-	if code := run(argv); code != 7 {
-		t.Fatalf("exit %d, want 7", code)
+	if code := run(argv); code != exitCommandFailed {
+		t.Fatalf("exit %d, want %d", code, exitCommandFailed)
+	}
+}
+
+// A command's own status never reads as one of flux-op's refusals, whichever
+// number it is.
+func TestACommandStatusIsNeverARefusal(t *testing.T) {
+	for _, status := range []int{exitUsage, exitTooLarge, exitNotData, exitDestinationExists, exitWouldDestroy, exitCanceled} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			v := newVolume(t)
+			argv := append(v.argv("--discard-staging", "--mkdir"),
+				"sh", "-c", "exit "+strconv.Itoa(status))
+
+			if code := run(argv); code != exitCommandFailed {
+				t.Fatalf("a command exiting %d made flux-op exit %d, want %d", status, code, exitCommandFailed)
+			}
+		})
 	}
 }
 

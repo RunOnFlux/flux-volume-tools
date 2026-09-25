@@ -31,9 +31,12 @@ import (
 	"syscall"
 )
 
-// Exit codes the caller distinguishes. Everything else is the command's own
-// status, passed through unchanged.
+// Exit codes the caller distinguishes. Only flux-op exits with them: a command
+// that fails exits exitCommandFailed whatever its own status, which is written
+// to stderr instead. A command's status would otherwise collide with these -
+// unzip exits 3 on a corrupt archive, zip 5 and 6 on errors of its own.
 const (
+	exitCommandFailed     = 1
 	exitUsage             = 2
 	exitTooLarge          = 3
 	exitNotData           = 4
@@ -264,7 +267,8 @@ func run(argv []string) int {
 				fmt.Fprintf(os.Stderr, "flux-op: result reached the %d byte limit\n", opts.maxBytes)
 				return exitTooLarge
 			}
-			return status
+			fmt.Fprintf(os.Stderr, "flux-op: command exited %d\n", status)
+			return exitCommandFailed
 		}
 
 		// An EMPTY command is legitimate and is how a move is expressed: its

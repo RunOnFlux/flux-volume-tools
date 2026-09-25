@@ -83,6 +83,12 @@ different sentence for a name in use than for an operation that failed, and a
 status is the one part of a failure that does not depend on which tool inside
 this image produced it.
 
+**A command's own status is never passed through.** A command that fails makes
+flux-op exit **1** and write `flux-op: command exited N` to stderr. The statuses
+flux-op names — `2`, `3`, `4`, `5`, `6` and `143` — therefore come only from
+flux-op: unzip exits `3` on a corrupt archive, and zip `5` and `6` on errors of
+its own, none of which is the refusal those numbers name here.
+
 `--root` is the volume root as the container sees it. `<staging>` and
 `<destination>` must both be inside it, and a publish that would leave it is
 refused before anything moves. The caller names `<staging>`: for a move it is the
