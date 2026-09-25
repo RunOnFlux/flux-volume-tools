@@ -52,8 +52,8 @@ an unprivileged system user is meant to remove.
 ## `flux-op` — publishing a result atomically
 
 ```
-flux-op --root <dir> [--discard-staging] [--mkdir] [--max-bytes N] [--data-only] \
-        [--from-stdin] [--no-replace] [--merge] <staging> <destination> -- [command [args...]]
+flux-op --root <dir> [--discard-staging] [--mkdir] [--max-bytes N] [--max-file-bytes N] \
+        [--data-only] [--from-stdin] [--no-replace] [--merge] <staging> <destination> -- [command [args...]]
 ```
 
 The command writes into `<staging>`, never into `<destination>`. Only on success
@@ -196,6 +196,7 @@ program's doing.
 | a FIFO, socket or device node | refused | `--data-only` |
 | a device node | cannot be created at all | `CAP_MKNOD` is dropped; FluxOS also mounts the volume `nodev` |
 | a setuid binary | the bit survives extraction, and is **inert** | FluxOS mounts the app volume `nosuid` |
+| a member that expands past the free space | stopped as it is written, at the ceiling | `--max-file-bytes` |
 | an archive of many tiny files | refused once what it **occupies** exceeds the ceiling | `--max-bytes`, measured on what landed rather than on what the archive declares |
 | anything reaching off the volume | nowhere to land | no network, read-only rootfs, the volume is the only mount |
 
