@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -223,20 +224,20 @@ func TestACommandStatusIsNeverARefusal(t *testing.T) {
 // --max-bytes is checked on the result once the command has finished, by what
 // it occupies, and does not limit the command's files as it writes them.
 func TestTheResultCeilingDoesNotLimitACommandsFiles(t *testing.T) {
-	var limit syscall.Rlimit
-	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
+	own, err := exec.Command("sh", "-c", "ulimit -f").Output()
+	if err != nil {
 		t.Fatal(err)
-	}
-	if limit.Cur != syscall.RLIM_INFINITY {
-		t.Skipf("this process already runs under a file size limit of %d", limit.Cur)
 	}
 
 	v := newVolume(t)
-	argv := append(v.argv("--discard-staging", "--mkdir", "--max-bytes", "1000"),
-		"sh", "-c", `[ "$(ulimit -f)" = unlimited ]`)
-
+	argv := append(v.argv("--discard-staging", "--mkdir", "--max-bytes", "1000000"),
+		"sh", "-c", "ulimit -f > "+filepath.Join(v.staging, "limit"))
 	if code := run(argv); code != 0 {
-		t.Fatalf("exit %d, want 0 - the command ran under a file size limit", code)
+		t.Fatalf("exit %d, want 0", code)
+	}
+
+	if got := read(t, filepath.Join(v.destination, "limit")); got != string(own) {
+		t.Errorf("the command ran under a file size limit of %q, want %q", got, own)
 	}
 }
 
