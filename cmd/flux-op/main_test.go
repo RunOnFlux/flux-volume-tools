@@ -164,7 +164,7 @@ func TestAResultOverTheCeilingIsRefusedAndReclaimed(t *testing.T) {
 // of it. Staging is kept here so the partial file can be measured.
 func TestACommandIsStoppedAtTheCeilingAsItWrites(t *testing.T) {
 	v := newVolume(t)
-	argv := append(v.argv("--max-bytes", "1000"),
+	argv := append(v.argv("--max-file-bytes", "1000"),
 		"sh", "-c", "head -c 4000 /dev/zero > "+v.staging)
 
 	if code := run(argv); code != exitTooLarge {
@@ -184,7 +184,7 @@ func TestACommandIsStoppedAtTheCeilingAsItWrites(t *testing.T) {
 // signal it was killed by is what says why.
 func TestACommandKilledByTheCapBesideItsResultIsTooLarge(t *testing.T) {
 	v := newVolume(t)
-	argv := append(v.argv("--discard-staging", "--max-bytes", "1000"),
+	argv := append(v.argv("--discard-staging", "--max-file-bytes", "1000"),
 		"sh", "-c", "head -c 4000 /dev/zero > "+filepath.Join(v.root, "scratch"))
 
 	if code := run(argv); code != exitTooLarge {
@@ -196,7 +196,7 @@ func TestACommandKilledByTheCapBesideItsResultIsTooLarge(t *testing.T) {
 // reported as a failed command rather than as too large.
 func TestAFailureUnderTheCeilingIsACommandFailure(t *testing.T) {
 	v := newVolume(t)
-	argv := append(v.argv("--discard-staging", "--max-bytes", "1000"),
+	argv := append(v.argv("--discard-staging", "--max-file-bytes", "1000"),
 		"sh", "-c", "head -c 10 /dev/zero > "+v.staging+"; exit 7")
 
 	if code := run(argv); code != exitCommandFailed {
@@ -220,6 +220,34 @@ func TestACommandStatusIsNeverARefusal(t *testing.T) {
 	}
 }
 
+// --max-bytes is checked on the result once the command has finished, by what
+// it occupies, and does not limit the command's files as it writes them.
+func TestTheResultCeilingDoesNotLimitACommandsFiles(t *testing.T) {
+	var limit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
+		t.Fatal(err)
+	}
+	if limit.Cur != syscall.RLIM_INFINITY {
+		t.Skipf("this process already runs under a file size limit of %d", limit.Cur)
+	}
+
+	v := newVolume(t)
+	argv := append(v.argv("--discard-staging", "--mkdir", "--max-bytes", "1000"),
+		"sh", "-c", `[ "$(ulimit -f)" = unlimited ]`)
+
+	if code := run(argv); code != 0 {
+		t.Fatalf("exit %d, want 0 - the command ran under a file size limit", code)
+	}
+}
+
+// A streamed upload runs no command, so there is no file for the limit to cap.
+func TestAFileCeilingIsRefusedForAStreamedUpload(t *testing.T) {
+	v := newVolume(t)
+	if code := run(v.argv("--discard-staging", "--from-stdin", "--max-file-bytes", "1000")); code != exitUsage {
+		t.Fatalf("exit %d, want %d", code, exitUsage)
+	}
+}
+
 // Without a ceiling nothing is capped, and the limit this process runs under
 // afterwards is the one it started with - it is lowered for the command only.
 func TestTheFileSizeLimitIsOnlyLoweredForACommandWithACeiling(t *testing.T) {
@@ -239,7 +267,7 @@ func TestTheFileSizeLimitIsOnlyLoweredForACommandWithACeiling(t *testing.T) {
 	}
 
 	capped := newVolume(t)
-	run(append(capped.argv("--discard-staging", "--max-bytes", "1000"),
+	run(append(capped.argv("--discard-staging", "--max-file-bytes", "1000"),
 		"sh", "-c", "head -c 4000 /dev/zero > "+capped.staging))
 
 	var after syscall.Rlimit

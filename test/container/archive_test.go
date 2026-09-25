@@ -27,7 +27,7 @@ func extract(t *testing.T, volume, archive string) outcome {
 	staging := "/work/.flux-op-" + operationID
 	return fluxOp(t, volume, "", append(
 		baseArgs("--discard-staging", "--mkdir", "--data-only", "--max-bytes", archiveCeiling,
-			staging, "/work/out", "--"),
+			"--max-file-bytes", archiveCeiling, staging, "/work/out", "--"),
 		"tar", "xf", archive, "-C", staging)...)
 }
 
@@ -131,7 +131,7 @@ func TestACorruptArchiveIsNotReportedAsTooLarge(t *testing.T) {
 	staging := "/work/.flux-op-" + operationID
 	result := fluxOp(t, volume, "", append(
 		baseArgs("--discard-staging", "--mkdir", "--data-only", "--max-bytes", "1000000",
-			staging, "/work/out", "--"),
+			"--max-file-bytes", "1000000", staging, "/work/out", "--"),
 		"unzip", "-q", "/work/archive.zip", "-d", staging)...)
 
 	if result.exit != 1 {
@@ -199,7 +199,8 @@ func compress(t *testing.T, volume, format string, extra ...string) outcome {
 	if format == "tar.gz" {
 		command = []string{"tar", "-czf", staging, "--", "src/noise"}
 	}
-	args := append(extra, "--max-bytes", strconv.Itoa(compressCeiling), staging, "/work/out."+format, "--")
+	ceiling := strconv.Itoa(compressCeiling)
+	args := append(extra, "--max-bytes", ceiling, "--max-file-bytes", ceiling, staging, "/work/out."+format, "--")
 	return fluxOp(t, volume, "", append(baseArgs(args...), command...)...)
 }
 

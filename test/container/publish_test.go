@@ -4,6 +4,7 @@ package container
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
@@ -156,6 +157,39 @@ func TestAResultOverTheCeilingIsRefusedAndReclaimed(t *testing.T) {
 	}
 	if exists(t, volume, "dest") {
 		t.Error("the destination was published despite the refusal")
+	}
+	requireNoArtefacts(t, volume)
+}
+
+// A copy is checked by what its result occupies, as the space it was measured
+// against was. A sparse file longer than the ceiling that occupies almost
+// nothing is copied and published, still sparse.
+func TestASparseFileLongerThanTheCeilingIsCopied(t *testing.T) {
+	volume := volumeDir(t)
+	seed(t, volume, `mkdir -p /work/src && truncate -s 200000000 /work/src/disk.img`)
+
+	staging := "/work/.flux-op-" + operationID
+	result := fluxOp(t, volume, "",
+		append(baseArgs("--discard-staging", "--max-bytes", "100000000", staging, "/work/dest", "--"),
+			"cp", "-a", "-T", "/work/src", staging)...)
+
+	if result.exit != 0 {
+		t.Fatalf("exit %d, want 0:\n%s", result.exit, result.output)
+	}
+	sizes := inContainer(t, volume, "", `stat -c 'FLUXOP_SPARSE=%s %b %B' /work/dest/disk.img`)
+	var length, blocks, blockSize int64
+	index := strings.LastIndex(sizes.output, "FLUXOP_SPARSE=")
+	if index < 0 {
+		t.Fatalf("the copy was not published:\n%s", sizes.output)
+	}
+	if _, err := fmt.Sscanf(sizes.output[index:], "FLUXOP_SPARSE=%d %d %d", &length, &blocks, &blockSize); err != nil {
+		t.Fatalf("%v:\n%s", err, sizes.output)
+	}
+	if length != 200000000 {
+		t.Errorf("published a file of %d bytes, want 200000000", length)
+	}
+	if occupied := blocks * blockSize; occupied >= 100000000 {
+		t.Errorf("the copy occupies %d bytes, so it was not a sparse file", occupied)
 	}
 	requireNoArtefacts(t, volume)
 }
