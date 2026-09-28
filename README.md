@@ -53,7 +53,8 @@ an unprivileged system user is meant to remove.
 
 ```
 flux-op --root <dir> [--discard-staging] [--mkdir] [--max-bytes N] [--max-file-bytes N] \
-        [--data-only] [--from-stdin] [--no-replace] [--merge] <staging> <destination> -- [command [args...]]
+        [--data-only] [--from-stdin] [--no-replace] [--merge] [--inherit-owner] \
+        <staging> <destination> -- [command [args...]]
 ```
 
 The command writes into `<staging>`, never into `<destination>`. Only on success
@@ -64,6 +65,15 @@ and a node that loses power all leave `<destination>` exactly as it was.
 the caller's source already *is* the result, so publishing it is the whole
 operation. With `--mkdir` and no command, creating a folder is the same shape:
 staging is made here and published under the name the caller asked for.
+
+**`--inherit-owner` gives the result the owner of the folder it lands in**: the
+destination itself when it is an existing directory (which a merge fills), and
+otherwise the directory that will hold it. This program runs as root, so without
+it an upload, an extraction, a new folder or an archive is owned by root, and an
+application running as any other user cannot change its own files. Only what is
+in staging is re-owned, so a merge leaves what was already there alone. Links are
+re-owned themselves and never followed. For a copy or a move it is not used:
+their files keep the owners they have.
 
 **`--no-replace` publishes only onto a free name**, and exits **5** when the name
 is taken. Without it a publish replaces whatever is at the destination, which is

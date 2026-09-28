@@ -2,7 +2,7 @@
 //
 //	flux-op --root <dir> [--discard-staging] [--mkdir] [--max-bytes N]
 //	        [--max-file-bytes N] [--data-only] [--from-stdin] [--no-replace]
-//	        <staging> <destination> -- [command [args...]]
+//	        [--merge] [--inherit-owner] <staging> <destination> -- [command [args...]]
 //
 // --root is the volume root. Staging and destination must both be inside it,
 // and a publish that would leave it is refused before anything moves.
@@ -57,6 +57,7 @@ type options struct {
 	fromStdin      bool
 	noReplace      bool
 	merge          bool
+	inheritOwner   bool
 
 	staging     string
 	destination string
@@ -64,7 +65,8 @@ type options struct {
 }
 
 const usage = "flux-op: usage: flux-op --root <dir> [--discard-staging] [--mkdir] " +
-	"[--max-bytes N] [--max-file-bytes N] [--data-only] [--from-stdin] [--no-replace] [--merge] <staging> <destination> " +
+	"[--max-bytes N] [--max-file-bytes N] [--data-only] [--from-stdin] [--no-replace] [--merge] [--inherit-owner] " +
+	"<staging> <destination> " +
 	"-- [command [args...]]"
 
 func main() {
@@ -131,6 +133,11 @@ func parse(argv []string) (*options, error) {
 	// that sat beside one they did, so a directory is never replaced wholesale by
 	// default - a copy, a move or an extraction over an existing folder merges.
 	flags.BoolVar(&opts.merge, "merge", false, "overlay a directory onto an existing one instead of replacing it")
+	// Give the result the owner of the directory it is published into. For an
+	// operation that CREATES content - an upload, an extraction, a new folder,
+	// an archive - which would otherwise be owned by root. Not for a copy or a
+	// move, whose files keep the owners they already have.
+	flags.BoolVar(&opts.inheritOwner, "inherit-owner", false, "give the result the owner of the directory it lands in")
 
 	if err := flags.Parse(argv); err != nil {
 		return nil, errUsage
@@ -317,6 +324,15 @@ func run(argv []string) int {
 				fmt.Fprintf(os.Stderr, "flux-op: result holds %s, which is not data and is not accepted here\n", result.nonData)
 				return exitNotData
 			}
+		}
+	}
+
+	// Before the publish, so the result appears in the volume already owned by
+	// the application and never as root's.
+	if opts.inheritOwner {
+		if err := inheritOwner(opts.staging, opts.destination); err != nil {
+			fmt.Fprintf(os.Stderr, "flux-op: could not set the result's owner: %v\n", err)
+			return 1
 		}
 	}
 
