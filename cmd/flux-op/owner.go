@@ -26,15 +26,10 @@ func inheritOwner(staging, destination string) error {
 	if info, err := os.Stat(destination); err != nil || !info.IsDir() {
 		folder = filepath.Dir(destination)
 	}
-	info, err := os.Stat(folder)
+	uid, gid, err := ownerOf(folder)
 	if err != nil {
-		return fmt.Errorf("could not read the owner of %s: %w", folder, err)
+		return err
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("no owner is recorded for %s on this platform", folder)
-	}
-	uid, gid := int(stat.Uid), int(stat.Gid)
 
 	return filepath.WalkDir(staging, func(path string, _ fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -42,4 +37,17 @@ func inheritOwner(staging, destination string) error {
 		}
 		return os.Lchown(path, uid, gid)
 	})
+}
+
+// ownerOf reads the owner of a folder, following a link to it.
+func ownerOf(folder string) (int, int, error) {
+	info, err := os.Stat(folder)
+	if err != nil {
+		return 0, 0, fmt.Errorf("could not read the owner of %s: %w", folder, err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, 0, fmt.Errorf("no owner is recorded for %s on this platform", folder)
+	}
+	return int(stat.Uid), int(stat.Gid), nil
 }

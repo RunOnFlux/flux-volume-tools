@@ -2,7 +2,7 @@
 //
 //	flux-op --root <dir> [--discard-staging] [--mkdir] [--max-bytes N]
 //	        [--max-file-bytes N] [--data-only] [--from-stdin] [--no-replace]
-//	        [--merge] [--inherit-owner] <staging> <destination> -- [command [args...]]
+//	        [--merge] [--inherit-owner] [--parents] <staging> <destination> -- [command [args...]]
 //
 // --root is the volume root. Staging and destination must both be inside it,
 // and a publish that would leave it is refused before anything moves.
@@ -58,6 +58,7 @@ type options struct {
 	noReplace      bool
 	merge          bool
 	inheritOwner   bool
+	parents        bool
 
 	staging     string
 	destination string
@@ -65,7 +66,7 @@ type options struct {
 }
 
 const usage = "flux-op: usage: flux-op --root <dir> [--discard-staging] [--mkdir] " +
-	"[--max-bytes N] [--max-file-bytes N] [--data-only] [--from-stdin] [--no-replace] [--merge] [--inherit-owner] " +
+	"[--max-bytes N] [--max-file-bytes N] [--data-only] [--from-stdin] [--no-replace] [--merge] [--inherit-owner] [--parents] " +
 	"<staging> <destination> " +
 	"-- [command [args...]]"
 
@@ -138,6 +139,10 @@ func parse(argv []string) (*options, error) {
 	// an archive - which would otherwise be owned by root. Not for a copy or a
 	// move, whose files keep the owners they already have.
 	flags.BoolVar(&opts.inheritOwner, "inherit-owner", false, "give the result the owner of the directory it lands in")
+	// Make the folders missing above the destination, each owned by the folder
+	// that receives it. For an upload into a folder that is not there yet, so
+	// the result brings its own folder with it.
+	flags.BoolVar(&opts.parents, "parents", false, "create the destination's missing parent directories")
 
 	if err := flags.Parse(argv); err != nil {
 		return nil, errUsage
@@ -324,6 +329,16 @@ func run(argv []string) int {
 				fmt.Fprintf(os.Stderr, "flux-op: result holds %s, which is not data and is not accepted here\n", result.nonData)
 				return exitNotData
 			}
+		}
+	}
+
+	// Only once the result is known to be publishable, so an operation that fails
+	// leaves no folders behind. Before inheritOwner, which reads the owner of the
+	// folder the result lands in.
+	if opts.parents {
+		if err := makeParents(opts.destination, opts.root); err != nil {
+			fmt.Fprintf(os.Stderr, "flux-op: could not create the destination's folder: %v\n", err)
+			return 1
 		}
 	}
 

@@ -53,7 +53,7 @@ an unprivileged system user is meant to remove.
 
 ```
 flux-op --root <dir> [--discard-staging] [--mkdir] [--max-bytes N] [--max-file-bytes N] \
-        [--data-only] [--from-stdin] [--no-replace] [--merge] [--inherit-owner] \
+        [--data-only] [--from-stdin] [--no-replace] [--merge] [--inherit-owner] [--parents] \
         <staging> <destination> -- [command [args...]]
 ```
 
@@ -74,6 +74,16 @@ application running as any other user cannot change its own files. Only what is
 in staging is re-owned, so a merge leaves what was already there alone. Links are
 re-owned themselves and never followed. For a copy or a move it is not used:
 their files keep the owners they have.
+
+**`--parents` makes the folders missing above the destination**, so a result can
+be published into a folder that is not there yet. Each folder it makes takes the
+owner of the folder that receives it, with or without `--inherit-owner`: a folder
+owned by root is one an application running as any other user cannot write into.
+They are made only once the result is ready to publish, so an operation that
+fails makes none, and they stay if the publish is then refused. A level something
+else makes at the same moment is used when it is a directory; a file or a link
+that leads nowhere at any level refuses the operation, as `mkdir -p` does. A link
+along the way is followed, and the only writable place it can lead is the volume.
 
 **`--no-replace` publishes only onto a free name**, and exits **5** when the name
 is taken. Without it a publish replaces whatever is at the destination, which is
